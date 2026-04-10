@@ -43,7 +43,6 @@
 #include "bundle-uri.h"
 
 #define FORCED_UPDATES_DELAY_WARNING_IN_MS (10 * 1000)
-
 static const char * const builtin_fetch_usage[] = {
 	N_("git fetch [<options>] [<repository> [<refspec>...]]"),
 	N_("git fetch [<options>] <group>"),
@@ -88,6 +87,8 @@ static int verbosity, deepen_relative, set_upstream, refetch;
 static int progress = -1;
 static int tags = TAGS_DEFAULT, update_shallow, deepen;
 static int atomic_fetch;
+static int packfile_report;
+static int prune_missing_refspecs;
 static enum transport_family family;
 static const char *depth;
 static const char *deepen_since;
@@ -482,6 +483,16 @@ static void filter_prefetch_refspec(struct refspec *rs)
 	}
 }
 
+static int refspec_allows_missing_for_prune(const struct refspec_item *item)
+{
+	return prune_missing_refspecs &&
+		prune &&
+		item->dst && item->dst[0] &&
+		!item->pattern &&
+		!item->negative &&
+		!item->exact_sha1;
+}
+
 static struct ref *get_ref_map(struct remote *remote,
 			       const struct ref *remote_refs,
 			       struct refspec *rs,
@@ -506,7 +517,8 @@ static struct ref *get_ref_map(struct remote *remote,
 		struct refspec *fetch_refspec;
 
 		for (i = 0; i < rs->nr; i++) {
-			get_fetch_map(remote_refs, &rs->items[i], &tail, 0);
+			get_fetch_map(remote_refs, &rs->items[i], &tail,
+				      refspec_allows_missing_for_prune(&rs->items[i]));
 			if (rs->items[i].dst && rs->items[i].dst[0])
 				*autotags = 1;
 		}
@@ -552,7 +564,8 @@ static struct ref *get_ref_map(struct remote *remote,
 		     /* Note: has_merge implies non-NULL branch->remote_name */
 		     (has_merge && !strcmp(branch->remote_name, remote->name)))) {
 			for (i = 0; i < remote->fetch.nr; i++) {
-				get_fetch_map(remote_refs, &remote->fetch.items[i], &tail, 0);
+				get_fetch_map(remote_refs, &remote->fetch.items[i], &tail,
+					      refspec_allows_missing_for_prune(&remote->fetch.items[i]));
 				if (remote->fetch.items[i].dst &&
 				    remote->fetch.items[i].dst[0])
 					*autotags = 1;
@@ -878,6 +891,86 @@ struct ref_update_display_info_array {
 	struct ref_update_display_info *info;
 	size_t alloc, nr;
 };
+
+struct packfile_report_pack {
+	char *pack_path;
+};
+
+struct packfile_report {
+	struct packfile_report_pack *packs;
+	size_t packs_alloc, packs_nr;
+};
+
+static void packfile_report_init(struct packfile_report *report)
+{
+	memset(report, 0, sizeof(*report));
+}
+
+static void packfile_report_release(struct packfile_report *report)
+{
+	size_t i;
+
+	for (i = 0; i < report->packs_nr; i++) {
+		free(report->packs[i].pack_path);
+	}
+	free(report->packs);
+}
+
+static int packfile_report_add_pack(struct packfile_report *report,
+				    const char *keep_path)
+{
+	const char *filename;
+	size_t base_len;
+	struct packfile_report_pack *pack;
+	struct strbuf base_path = STRBUF_INIT;
+	struct strbuf pack_path = STRBUF_INIT;
+
+	if (!report || !strip_suffix(keep_path, ".keep", &base_len))
+		return 0;
+
+	strbuf_add(&base_path, keep_path, base_len);
+	strbuf_addbuf(&pack_path, &base_path);
+	strbuf_addstr(&pack_path, ".pack");
+
+	filename = strrchr(base_path.buf, '/');
+	filename = filename ? filename + 1 : base_path.buf;
+	if (!starts_with(filename, "pack-")) {
+		strbuf_release(&base_path);
+		strbuf_release(&pack_path);
+		return error(_("unexpected pack keepfile name '%s'"), keep_path);
+	}
+
+	ALLOC_GROW(report->packs, report->packs_nr + 1, report->packs_alloc);
+	pack = &report->packs[report->packs_nr++];
+	pack->pack_path = strbuf_detach(&pack_path, NULL);
+
+	strbuf_release(&base_path);
+	return 0;
+}
+
+static int packfile_report_add_pack_lockfiles(struct packfile_report *report,
+					      struct transport *transport)
+{
+	size_t i;
+
+	if (!report)
+		return 0;
+
+	for (i = 0; i < transport->pack_lockfiles.nr; i++)
+		if (packfile_report_add_pack(report,
+					     transport->pack_lockfiles.items[i].string))
+			return -1;
+
+	return 0;
+}
+
+static void packfile_report_print(const struct packfile_report *report)
+{
+	size_t i;
+
+	for (i = 0; i < report->packs_nr; i++)
+		printf("p %s\n", report->packs[i].pack_path);
+}
 
 static struct ref_update_display_info *ref_update_display_info_append(
 					   struct ref_update_display_info_array *array,
@@ -1332,7 +1425,7 @@ static int store_updated_refs(struct display_state *display_state,
 				rc |= update_local_ref(ref, transaction, rm,
 						       config, display_array);
 				free(ref);
-			} else if (write_fetch_head || dry_run) {
+			} else if (!packfile_report && (write_fetch_head || dry_run)) {
 				/*
 				 * Display fetches written to FETCH_HEAD (or
 				 * would be written to FETCH_HEAD, if --dry-run
@@ -1412,7 +1505,8 @@ static int fetch_and_consume_refs(struct display_state *display_state,
 				  struct ref *ref_map,
 				  struct fetch_head *fetch_head,
 				  const struct fetch_config *config,
-				  struct ref_update_display_info_array *display_array)
+				  struct ref_update_display_info_array *display_array,
+				  struct packfile_report *report)
 {
 	int connectivity_checked = 1;
 	int ret;
@@ -1439,6 +1533,8 @@ static int fetch_and_consume_refs(struct display_state *display_state,
 	trace2_region_leave("fetch", "consume_refs", the_repository);
 
 out:
+	if (!ret && packfile_report_add_pack_lockfiles(report, transport))
+		ret = -1;
 	transport_unlock_pack(transport, 0);
 	return ret;
 }
@@ -1657,7 +1753,8 @@ static int backfill_tags(struct display_state *display_state,
 			 struct fetch_head *fetch_head,
 			 const struct fetch_config *config,
 			 struct ref_update_display_info_array *display_array,
-			 struct list_objects_filter_options *filter_options)
+			 struct list_objects_filter_options *filter_options,
+			 struct packfile_report *report)
 {
 	int retcode, cannot_reuse;
 
@@ -1679,7 +1776,7 @@ static int backfill_tags(struct display_state *display_state,
 	transport_set_option(transport, TRANS_OPT_DEPTH, "0");
 	transport_set_option(transport, TRANS_OPT_DEEPEN_RELATIVE, NULL);
 	retcode = fetch_and_consume_refs(display_state, transport, transaction, ref_map,
-					 fetch_head, config, display_array);
+					 fetch_head, config, display_array, report);
 
 	if (gsecondary) {
 		transport_disconnect(gsecondary);
@@ -1900,7 +1997,11 @@ static int do_fetch(struct transport *transport,
 	int do_set_head = 0;
 	struct ref_update_display_info_array display_array = { 0 };
 	struct strmap rejected_refs = STRMAP_INIT;
+	struct packfile_report report;
 	int summary_width = 0;
+
+	if (packfile_report)
+		packfile_report_init(&report);
 
 	if (tags == TAGS_DEFAULT) {
 		if (transport->remote->fetch_tags == 2)
@@ -1979,7 +2080,7 @@ static int do_fetch(struct transport *transport,
 	display_state_init(&display_state, ref_map, transport->url,
 			   config->display_format);
 
-	if (atomic_fetch) {
+	if (atomic_fetch && !packfile_report) {
 		transaction = ref_store_transaction_begin(get_main_ref_store(the_repository),
 							  0, &err);
 		if (!transaction) {
@@ -2015,7 +2116,7 @@ static int do_fetch(struct transport *transport,
 	 * can delete and create refs (with F/D conflicts) in the same transaction
 	 * and this can be moved above the 'prune_refs()' block.
 	 */
-	if (!transaction) {
+	if (!transaction && !packfile_report) {
 		transaction = ref_store_transaction_begin(get_main_ref_store(the_repository),
 							  REF_TRANSACTION_ALLOW_FAILURE, &err);
 		if (!transaction) {
@@ -2025,7 +2126,8 @@ static int do_fetch(struct transport *transport,
 	}
 
 	if (fetch_and_consume_refs(&display_state, transport, transaction, ref_map,
-				   &fetch_head, config, &display_array)) {
+				   &fetch_head, config, &display_array,
+				   packfile_report ? &report : NULL)) {
 		retcode = 1;
 		goto cleanup;
 	}
@@ -2048,7 +2150,8 @@ static int do_fetch(struct transport *transport,
 			 * the transaction and don't commit anything.
 			 */
 			if (backfill_tags(&display_state, transport, transaction, tags_ref_map,
-					  &fetch_head, config, &display_array, filter_options))
+					  &fetch_head, config, &display_array, filter_options,
+					  packfile_report ? &report : NULL))
 				retcode = 1;
 		}
 
@@ -2061,9 +2164,10 @@ static int do_fetch(struct transport *transport,
 	if (verbosity >= 0)
 		summary_width = transport_summary_width(ref_map);
 
-	retcode = commit_ref_transaction(&transaction, atomic_fetch,
-					 transport->remote->name,
-					 &rejected_refs, &err);
+	if (!packfile_report)
+		retcode = commit_ref_transaction(&transaction, atomic_fetch,
+						 transport->remote->name,
+						 &rejected_refs, &err);
 	/*
 	 * With '--atomic', bail out if the transaction fails. Without '--atomic',
 	 * continue to fetch head and perform other post-fetch operations.
@@ -2071,9 +2175,10 @@ static int do_fetch(struct transport *transport,
 	if (retcode && atomic_fetch)
 		goto cleanup;
 
-	commit_fetch_head(&fetch_head);
+	if (!packfile_report)
+		commit_fetch_head(&fetch_head);
 
-	if (set_upstream) {
+	if (!packfile_report && set_upstream) {
 		struct branch *branch = branch_get("HEAD");
 		struct ref *rm;
 		struct ref *source_ref = NULL;
@@ -2126,7 +2231,7 @@ static int do_fetch(struct transport *transport,
 				  "you need to specify exactly one branch with the --set-upstream option"));
 		}
 	}
-	if (do_set_head) {
+	if (do_set_head && !packfile_report) {
 		/*
 		 * Way too many cases where this can go wrong so let's just
 		 * ignore errors and fail silently for now.
@@ -2139,7 +2244,7 @@ cleanup:
 	 * When using batched updates, we want to commit the non-rejected
 	 * updates and also handle the rejections.
 	 */
-	if (retcode && !atomic_fetch && transaction)
+	if (retcode && !atomic_fetch && transaction && !packfile_report)
 		commit_ref_transaction(&transaction, false,
 				       transport->remote->name,
 				       &rejected_refs, &err);
@@ -2152,6 +2257,9 @@ cleanup:
 		ref_update_display_info_display(info, &display_state, summary_width);
 		ref_update_display_info_free(info);
 	}
+
+	if (packfile_report)
+		packfile_report_print(&report);
 
 	if (retcode) {
 		if (err.len) {
@@ -2168,6 +2276,8 @@ cleanup:
 		ref_transaction_free(transaction);
 
 	free(display_array.info);
+	if (packfile_report)
+		packfile_report_release(&report);
 	strmap_clear(&rejected_refs, 0);
 	display_state_release(&display_state);
 	close_fetch_head(&fetch_head);
@@ -2413,6 +2523,9 @@ static int fetch_one(struct remote *remote, int argc, const char **argv,
 			prune = PRUNE_BY_DEFAULT;
 	}
 
+	if (prune_missing_refspecs && !prune)
+		die(_("--prune-missing-refspecs requires --prune"));
+
 	if (prune_tags < 0) {
 		/* no command line request */
 		if (0 <= remote->prune_tags)
@@ -2587,6 +2700,12 @@ int cmd_fetch(int argc,
 			 N_("write the commit-graph after fetching")),
 		OPT_BOOL(0, "stdin", &stdin_refspecs,
 			 N_("accept refspecs from stdin")),
+		OPT_BOOL_F(0, "packfile-report", &packfile_report,
+			   N_("download packs and report pack paths without updating refs"),
+			   PARSE_OPT_HIDDEN),
+		OPT_BOOL_F(0, "prune-missing-refspecs", &prune_missing_refspecs,
+			   N_("allow missing exact source refspecs to be pruned"),
+			   PARSE_OPT_HIDDEN),
 		OPT_END()
 	};
 
@@ -2615,6 +2734,23 @@ int cmd_fetch(int argc,
 
 	if (recurse_submodules_cli != RECURSE_SUBMODULES_DEFAULT)
 		config.recurse_submodules = recurse_submodules_cli;
+
+	if (packfile_report) {
+		dry_run = 1;
+		porcelain = 1;
+		write_fetch_head = 0;
+		keep = 1;
+		enable_auto_gc = 0;
+		fetch_write_commit_graph = 0;
+		config.recurse_submodules = RECURSE_SUBMODULES_OFF;
+		if (set_upstream)
+			die(_("options '%s' and '%s' cannot be used together"),
+			    "--packfile-report", "--set-upstream");
+		if (recurse_submodules_cli != RECURSE_SUBMODULES_DEFAULT &&
+		    recurse_submodules_cli != RECURSE_SUBMODULES_OFF)
+			die(_("options '%s' and '%s' cannot be used together"),
+			    "--packfile-report", "--recurse-submodules");
+	}
 
 	if (negotiate_only) {
 		switch (recurse_submodules_cli) {
@@ -2692,7 +2828,8 @@ int cmd_fetch(int argc,
 	if (!max_jobs)
 		max_jobs = online_cpus();
 
-	if (!repo_config_get_string_tmp(the_repository, "fetch.bundleuri", &bundle_uri) &&
+	if (!packfile_report &&
+	    !repo_config_get_string_tmp(the_repository, "fetch.bundleuri", &bundle_uri) &&
 	    fetch_bundle_uri(the_repository, bundle_uri, NULL))
 		warning(_("failed to fetch bundles from '%s'"), bundle_uri);
 
@@ -2740,6 +2877,9 @@ int cmd_fetch(int argc,
 		}
 	}
 	string_list_remove_duplicates(&list, 0);
+
+	if (packfile_report && (all || multiple || !remote))
+		die(_("--packfile-report can only be used when fetching from one remote"));
 
 	if (negotiate_only) {
 		struct oidset acked_commits = OIDSET_INIT;

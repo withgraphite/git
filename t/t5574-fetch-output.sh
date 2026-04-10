@@ -301,4 +301,51 @@ test_expect_success '--no-show-forced-updates' '
 	)
 '
 
+test_expect_success 'fetch packfile report downloads pack and does not update refs' '
+	test_when_finished "rm -rf packfile-report.git" &&
+	test_when_finished "git branch -D packfile-report-src" &&
+	git branch packfile-report-src HEAD &&
+	new_oid=$(git rev-parse packfile-report-src) &&
+	git init --bare packfile-report.git &&
+
+	git -C packfile-report.git fetch --packfile-report --prune \
+		--prune-missing-refspecs --force --no-tags .. \
+		+refs/heads/packfile-report-src:refs/heads/packfile-report-src >actual &&
+
+	test_grep "^p " actual &&
+	test_grep "^\\* $ZERO_OID $new_oid refs/heads/packfile-report-src$" actual &&
+	test_must_fail git -C packfile-report.git rev-parse --verify refs/heads/packfile-report-src &&
+	test_path_is_missing packfile-report.git/FETCH_HEAD &&
+
+	pack=$(sed -n "s/^p //p" actual) &&
+	idx=${pack%.pack}.idx &&
+	test_path_is_file "packfile-report.git/$pack" &&
+	test_path_is_file "packfile-report.git/$idx"
+'
+
+test_expect_success 'fetch packfile report handles scoped missing refspec prune' '
+	test_when_finished "rm -rf packfile-delete.git" &&
+	test_when_finished "git branch -D packfile-report-gone || :" &&
+	git branch packfile-report-gone HEAD &&
+	gone_oid=$(git rev-parse packfile-report-gone) &&
+	git init --bare packfile-delete.git &&
+	git -C packfile-delete.git fetch .. \
+		+refs/heads/packfile-report-gone:refs/heads/packfile-report-gone &&
+	git branch -D packfile-report-gone &&
+
+	test_must_fail git -C packfile-delete.git fetch --packfile-report --prune \
+		--force --no-tags .. \
+		+refs/heads/packfile-report-gone:refs/heads/packfile-report-gone >fail.out 2>fail.err &&
+	test_grep "couldn.t find remote ref refs/heads/packfile-report-gone" fail.err &&
+
+	git -C packfile-delete.git fetch --packfile-report --prune \
+		--prune-missing-refspecs --force --no-tags .. \
+		+refs/heads/packfile-report-gone:refs/heads/packfile-report-gone >actual &&
+
+	test_grep ! "^p " actual &&
+	test_grep "^- $gone_oid $ZERO_OID refs/heads/packfile-report-gone$" actual &&
+	actual_oid=$(git -C packfile-delete.git rev-parse refs/heads/packfile-report-gone) &&
+	test "$actual_oid" = "$gone_oid"
+'
+
 test_done
