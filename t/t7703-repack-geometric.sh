@@ -330,6 +330,65 @@ test_expect_success '--geometric with pack.packSizeLimit' '
 	)
 '
 
+test_expect_success '--geometric rolls back new packs on MIDX failure' '
+	git init rollback &&
+	test_when_finished "rm -fr rollback" &&
+	(
+		cd rollback &&
+
+		test_commit_bulk --start=1 1 &&
+		test_commit_bulk --start=2 1 &&
+		test_commit_bulk --start=3 4 &&
+		test_commit_bulk --start=7 8 &&
+
+		find $packdir -type f -name "pack-*" | sort >expect &&
+		>"$midx.lock" &&
+
+		test_must_fail git repack --geometric=2 -d --write-midx \
+			--write-bitmap-index 2>err &&
+		test_grep "multi-pack-index.lock" err &&
+
+		find $packdir -type f -name "pack-*" | sort >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success '--geometric rollback retains pre-existing output packs' '
+	git init pack-rewrite-rollback &&
+	test_when_finished "rm -fr pack-rewrite-rollback" &&
+	(
+		cd pack-rewrite-rollback &&
+
+		test-tool genrandom foo 1048576 >foo &&
+		test-tool genrandom bar 1048576 >bar &&
+
+		git add foo bar &&
+		test_tick &&
+		git commit -m base &&
+
+		git rev-parse HEAD:foo HEAD:bar >p1.objects &&
+		git rev-parse HEAD HEAD^{tree} >p2.objects &&
+
+		p1="$(git pack-objects $packdir/pack <p1.objects)" &&
+		p2="$(git pack-objects $packdir/pack <p2.objects)" &&
+		git prune-packed &&
+
+		find $packdir -type f -name "pack-*" | sort >expect &&
+		>"$midx.lock" &&
+
+		test_must_fail git repack --geometric=2 -d \
+			--max-pack-size=1048576 --write-midx \
+			--write-bitmap-index 2>err &&
+		test_grep "multi-pack-index.lock" err &&
+
+		find $packdir -type f -name "pack-*" | sort >actual &&
+		test_cmp expect actual &&
+		test_path_is_file $packdir/pack-$p1.pack &&
+		test_path_is_file $packdir/pack-$p2.pack &&
+		git fsck
+	)
+'
+
 test_expect_success '--geometric --write-midx retains up-to-date MIDX without bitmap index' '
 	test_when_finished "rm -fr repo" &&
 	git init repo &&

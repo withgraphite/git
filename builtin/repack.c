@@ -98,6 +98,43 @@ static int repack_config(const char *var, const char *value,
 	return git_default_config(var, value, ctx, cb);
 }
 
+static void add_pack_names_from_list(struct string_list *names,
+				     const struct string_list *packs)
+{
+	struct string_list_item *item;
+
+	for_each_string_list_item(item, packs)
+		string_list_insert(names, item->string);
+}
+
+static void populate_pack_names(struct existing_packs *existing,
+				struct string_list *names)
+{
+	add_pack_names_from_list(names, &existing->kept_packs);
+	add_pack_names_from_list(names, &existing->non_kept_packs);
+	add_pack_names_from_list(names, &existing->cruft_packs);
+}
+
+static void remove_new_packs(struct repository *repo, const char *packdir,
+			     struct string_list *names,
+			     struct string_list *existing_pack_names)
+{
+	struct string_list_item *item;
+	struct strbuf buf = STRBUF_INIT;
+
+	for_each_string_list_item(item, names) {
+		strbuf_reset(&buf);
+		strbuf_addf(&buf, "pack-%s", item->string);
+
+		if (string_list_has_string(existing_pack_names, buf.buf))
+			continue;
+
+		repack_remove_redundant_pack(repo, packdir, buf.buf);
+	}
+
+	strbuf_release(&buf);
+}
+
 int cmd_repack(int argc,
 	       const char **argv,
 	       const char *prefix,
@@ -106,6 +143,7 @@ int cmd_repack(int argc,
 	struct child_process cmd = CHILD_PROCESS_INIT;
 	struct string_list_item *item;
 	struct string_list names = STRING_LIST_INIT_DUP;
+	struct string_list existing_pack_names = STRING_LIST_INIT_DUP;
 	struct string_list repack_event_inputs = STRING_LIST_INIT_DUP;
 	struct string_list repack_event_outputs = STRING_LIST_INIT_DUP;
 	struct existing_packs existing = EXISTING_PACKS_INIT;
@@ -113,6 +151,7 @@ int cmd_repack(int argc,
 	struct tempfile *refs_snapshot = NULL;
 	int i, ret;
 	int show_progress;
+	int rollback_new_packs = 0;
 
 	/* variables to be filled by option parsing */
 	struct repack_config_ctx config_ctx;
@@ -269,6 +308,7 @@ int cmd_repack(int argc,
 
 	existing.repo = repo;
 	existing_packs_collect(&existing, &keep_pack_list);
+	populate_pack_names(&existing, &existing_pack_names);
 
 	if (geometry.split_factor) {
 		if (pack_everything)
@@ -536,6 +576,7 @@ int cmd_repack(int argc,
 	for_each_string_list_item(item, &names)
 		generated_pack_install(item->util, item->string, packdir,
 				       packtmp);
+	rollback_new_packs = 1;
 	/* End of pack replacement. */
 
 	if (print_repack_events &&
@@ -571,10 +612,15 @@ int cmd_repack(int argc,
 			goto cleanup;
 	}
 
+	if (!delete_redundant)
+		rollback_new_packs = 0;
+
 	odb_reprepare(repo->objects);
 
 	if (delete_redundant) {
 		int opts = 0;
+
+		rollback_new_packs = 0;
 		existing_packs_remove_redundant(&existing, packdir);
 
 		if (geometry.split_factor)
@@ -603,7 +649,11 @@ int cmd_repack(int argc,
 	}
 
 cleanup:
+	if (ret && rollback_new_packs)
+		remove_new_packs(repo, packdir, &names,
+				 &existing_pack_names);
 	string_list_clear(&keep_pack_list, 0);
+	string_list_clear(&existing_pack_names, 0);
 	string_list_clear(&repack_event_inputs, 0);
 	string_list_clear(&repack_event_outputs, 0);
 	string_list_clear(&names, 1);
