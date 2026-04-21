@@ -116,6 +116,38 @@ test_expect_success '--geometric with small-pack rollup' '
 	)
 '
 
+test_expect_success '--geometric prints repack events' '
+	git init geometric &&
+	test_when_finished "rm -fr geometric" &&
+	(
+		cd geometric &&
+
+		test_commit_bulk --start=1 1 &&
+		test_commit_bulk --start=2 1 &&
+		find $objdir/pack -name "*.pack" |
+			sed -e "s/.*pack-//" -e "s/\\.pack$//" |
+			sort >input-shas &&
+		test_commit_bulk --start=3 4 &&
+		test_commit_bulk --start=7 8 &&
+
+		git repack --geometric 2 -d --print-repack-events >out &&
+
+		grep "^repack " out >events &&
+		test_line_count = 1 events &&
+		sed -n "s/^repack \\(.*\\) into .*/\\1/p" events |
+			tr " " "\\n" |
+			sort >actual-input-shas &&
+		test_cmp input-shas actual-input-shas &&
+		sed -n "s/^repack .* into \\(.*\\)$/\\1/p" events |
+			tr " " "\\n" >output-shas &&
+		test_line_count = 1 output-shas &&
+		while read sha
+		do
+			test_path_is_file "$objdir/pack/pack-$sha.pack" || exit 1
+		done <output-shas
+	)
+'
+
 test_expect_success '--geometric with small- and large-pack rollup' '
 	git init geometric &&
 	test_when_finished "rm -fr geometric" &&
@@ -274,7 +306,18 @@ test_expect_success '--geometric with pack.packSizeLimit' '
 		#   - another containing object "bar",
 		#   - a final pack containing the commit and tree objects
 		#     (identical to p2 above)
-		git repack --geometric 2 -d --max-pack-size=1048576 &&
+		git repack --geometric 2 -d --max-pack-size=1048576 \
+			--print-repack-events >out &&
+		grep "^repack " out >events &&
+		test_line_count = 1 events &&
+		printf "%s\n%s\n" "$p1" "$p2" | sort >expect-inputs &&
+		sed -n "s/^repack \\(.*\\) into .*/\\1/p" events |
+			tr " " "\\n" |
+			sort >actual-inputs &&
+		test_cmp expect-inputs actual-inputs &&
+		sed -n "s/^repack .* into \\(.*\\)$/\\1/p" events |
+			tr " " "\\n" >outputs &&
+		test_line_count = 3 outputs &&
 
 		# Ensure `repack` can detect that the third pack it wrote
 		# (containing just the tree and commit objects) was identical to
@@ -521,6 +564,10 @@ test_expect_success 'geometric repack works with promisor packs' '
 
 		ls .git/objects/pack/*.pack >packs-before &&
 		test_line_count = 8 packs-before &&
+		test_must_fail git repack --geometric=2 -d \
+			--print-repack-events >promisor-out 2>promisor-err &&
+		test_grep "cannot be used when repacking promisor packs" promisor-err &&
+		test_grep ! "^repack " promisor-out &&
 		git repack --geometric=2 -d &&
 		ls .git/objects/pack/*.pack >packs-after &&
 		test_line_count = 5 packs-after &&
