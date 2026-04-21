@@ -249,6 +249,12 @@ When writing a multi-pack bitmap, `git repack` selects the largest resulting
 pack as the preferred pack for object selection by the MIDX (see
 linkgit:git-multi-pack-index[1]).
 
+--print-repack-events::
+	With `--geometric`, print machine-readable lines describing packfile
+	roll-ups. Each line has the form `repack <input-pack-hash>... into
+	<output-pack-hash>...`. This option cannot be used when promisor packs
+	would be repacked.
+
 -m::
 --write-midx::
 	Write a multi-pack index (see linkgit:git-multi-pack-index[1])

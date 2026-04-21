@@ -4,6 +4,7 @@
 #include "builtin.h"
 #include "config.h"
 #include "environment.h"
+#include "hex.h"
 #include "parse-options.h"
 #include "path.h"
 #include "run-command.h"
@@ -105,6 +106,8 @@ int cmd_repack(int argc,
 	struct child_process cmd = CHILD_PROCESS_INIT;
 	struct string_list_item *item;
 	struct string_list names = STRING_LIST_INIT_DUP;
+	struct string_list repack_event_inputs = STRING_LIST_INIT_DUP;
+	struct string_list repack_event_outputs = STRING_LIST_INIT_DUP;
 	struct existing_packs existing = EXISTING_PACKS_INIT;
 	struct pack_geometry geometry = { 0 };
 	struct tempfile *refs_snapshot = NULL;
@@ -128,6 +131,7 @@ int cmd_repack(int argc,
 	const char *opt_depth = NULL;
 	const char *opt_threads = NULL;
 	unsigned long combine_cruft_below_size = 0ul;
+	int print_repack_events = 0;
 
 	struct option builtin_repack_options[] = {
 		OPT_BIT('a', NULL, &pack_everything,
@@ -185,6 +189,8 @@ int cmd_repack(int argc,
 				N_("do not repack this pack")),
 		OPT_INTEGER('g', "geometric", &geometry.split_factor,
 			    N_("find a geometric progression with factor <N>")),
+		OPT_BOOL(0, "print-repack-events", &print_repack_events,
+			 N_("print geometric repack input/output pack hashes")),
 		OPT_BOOL('m', "write-midx", &write_midx,
 			   N_("write a multi-pack index of the resulting packs")),
 		OPT_STRING(0, "expire-to", &expire_to, N_("dir"),
@@ -269,7 +275,12 @@ int cmd_repack(int argc,
 			die(_("options '%s' and '%s' cannot be used together"), "--geometric", "-A/-a");
 		pack_geometry_init(&geometry, &existing, &po_args);
 		pack_geometry_split(&geometry);
+		if (print_repack_events && geometry.promisor_split)
+			die(_("option '%s' cannot be used when repacking promisor packs"),
+			    "--print-repack-events");
 	}
+	if (print_repack_events && !geometry.split_factor)
+		die(_("option '%s' requires '%s'"), "--print-repack-events", "--geometric");
 
 	prepare_pack_objects(&cmd, &po_args, packtmp);
 
@@ -395,10 +406,21 @@ int cmd_repack(int argc,
 			.destination = packdir,
 			.packtmp = packtmp,
 		};
+		size_t names_before_pack_objects = names.nr;
+		size_t j;
 		ret = finish_pack_objects_cmd(repo->hash_algo, &opts, &cmd,
 					      &names);
 		if (ret)
 			goto cleanup;
+		if (print_repack_events && geometry.split) {
+			for (i = 0; i < geometry.split; i++)
+				string_list_append(&repack_event_inputs,
+						   hash_to_hex_algop(geometry.pack[i]->hash,
+								     repo->hash_algo));
+			for (j = names_before_pack_objects; j < names.nr; j++)
+				string_list_append(&repack_event_outputs,
+						   names.items[j].string);
+		}
 	}
 
 	if (!names.nr) {
@@ -516,6 +538,18 @@ int cmd_repack(int argc,
 				       packtmp);
 	/* End of pack replacement. */
 
+	if (print_repack_events &&
+	    repack_event_inputs.nr &&
+	    repack_event_outputs.nr) {
+		printf("repack");
+		for_each_string_list_item(item, &repack_event_inputs)
+			printf(" %s", item->string);
+		printf(" into");
+		for_each_string_list_item(item, &repack_event_outputs)
+			printf(" %s", item->string);
+		printf("\n");
+	}
+
 	if (delete_redundant && pack_everything & ALL_INTO_ONE)
 		existing_packs_mark_for_deletion(&existing, &names);
 
@@ -570,6 +604,8 @@ int cmd_repack(int argc,
 
 cleanup:
 	string_list_clear(&keep_pack_list, 0);
+	string_list_clear(&repack_event_inputs, 0);
+	string_list_clear(&repack_event_outputs, 0);
 	string_list_clear(&names, 1);
 	existing_packs_release(&existing);
 	pack_geometry_release(&geometry);
