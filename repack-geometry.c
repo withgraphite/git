@@ -88,6 +88,56 @@ void pack_geometry_init(struct pack_geometry *geometry,
 	strbuf_release(&buf);
 }
 
+void pack_geometry_reorder_by_pack_order(struct pack_geometry *geometry,
+					 const struct string_list *pack_order)
+{
+	struct packed_git **ordered;
+	unsigned char *selected;
+	uint32_t ordered_nr = 0;
+	uint32_t ordered_limit;
+
+	if (!pack_order->nr)
+		die(_("pack order file must list at least one pack"));
+
+	CALLOC_ARRAY(selected, geometry->pack_nr);
+	ALLOC_ARRAY(ordered, geometry->pack_nr);
+
+	for (size_t i = 0; i < pack_order->nr; i++) {
+		const char *want = pack_order->items[i].string;
+		uint32_t found = geometry->pack_nr;
+
+		for (uint32_t j = 0; j < geometry->pack_nr; j++) {
+			if (!strcmp(pack_basename(geometry->pack[j]), want)) {
+				found = j;
+				break;
+			}
+		}
+
+		if (found == geometry->pack_nr)
+			continue;
+		if (selected[found])
+			die(_("pack '%s' appears multiple times in pack order file"), want);
+
+		selected[found] = 1;
+		ordered[ordered_nr++] = geometry->pack[found];
+	}
+	ordered_limit = ordered_nr;
+
+	for (uint32_t i = 0; i < geometry->pack_nr; i++) {
+		if (!selected[i])
+			ordered[ordered_nr++] = geometry->pack[i];
+	}
+
+	if (ordered_nr != geometry->pack_nr)
+		BUG("reordered pack geometry lost packs");
+
+	free(geometry->pack);
+	geometry->pack = ordered;
+	geometry->split_limit = ordered_limit;
+	geometry->split_limit_enabled = 1;
+	free(selected);
+}
+
 static uint32_t compute_pack_geometry_split(struct packed_git **pack, size_t pack_nr,
 					    int split_factor)
 {
@@ -170,6 +220,8 @@ void pack_geometry_split(struct pack_geometry *geometry)
 {
 	geometry->split = compute_pack_geometry_split(geometry->pack, geometry->pack_nr,
 						      geometry->split_factor);
+	if (geometry->split_limit_enabled && geometry->split > geometry->split_limit)
+		geometry->split = geometry->split_limit;
 	geometry->promisor_split = compute_pack_geometry_split(geometry->promisor_pack,
 							       geometry->promisor_pack_nr,
 							       geometry->split_factor);

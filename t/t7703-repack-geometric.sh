@@ -148,6 +148,83 @@ test_expect_success '--geometric prints repack events' '
 	)
 '
 
+test_expect_success '--geometric can use caller-provided pack order' '
+	git init geometric-order &&
+	test_when_finished "rm -fr geometric-order" &&
+	(
+		cd geometric-order &&
+
+		test_commit_bulk --start=1 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; >small-1 &&
+		test_commit_bulk --start=2 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f small-1 >small-2 &&
+		test_commit_bulk --start=3 4 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f small-1 |
+			grep -v -f small-2 >medium &&
+		test_commit_bulk --start=7 8 &&
+
+		{
+			cat medium &&
+			cat small-1
+		} >pack-order &&
+
+		git repack --geometric 2 -d --print-repack-events \
+			--geometric-pack-order=- <pack-order >out &&
+
+		grep "^repack " out >events &&
+		test_line_count = 1 events &&
+		sed -n "s/^repack \\(.*\\) into .*/\\1/p" events >actual-inputs &&
+		sed -e "s/^pack-//" -e "s/\\.pack$//" pack-order |
+			tr "\\n" " " |
+			sed "s/ $//" >expect-inputs &&
+		echo >>expect-inputs &&
+		test_cmp expect-inputs actual-inputs &&
+		sed -n "s/^repack .* into \\(.*\\)$/\\1/p" events |
+			tr " " "\\n" >output-shas &&
+		test_line_count = 1 output-shas &&
+		while read sha
+		do
+			test_path_is_file "$objdir/pack/pack-$sha.pack" || exit 1
+		done <output-shas &&
+		git fsck
+	)
+'
+
+test_expect_success '--geometric validates duplicate caller-provided pack order' '
+	git init geometric-order-validation &&
+	test_when_finished "rm -fr geometric-order-validation" &&
+	(
+		cd geometric-order-validation &&
+
+		test_commit one &&
+		git repack -d &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; >pack-order &&
+		cat pack-order pack-order >duplicate-order &&
+		test_must_fail git repack --geometric 2 \
+			--geometric-pack-order=- <duplicate-order 2>err &&
+		test_grep "appears multiple times" err &&
+
+		test_must_fail git repack --geometric 2 \
+			--geometric-pack-order=does-not-exist 2>err &&
+		test_grep "does-not-exist" err &&
+
+		printf "pack-%040d.pack\\n" 0 >missing-order &&
+		git repack --geometric 2 \
+			--geometric-pack-order=missing-order >out &&
+		test_grep "Nothing new to pack" out &&
+
+		while read sha
+		do
+			touch "$objdir/pack/${sha%.pack}.keep" || exit 1
+		done <pack-order &&
+		git repack --geometric 2 \
+			--geometric-pack-order=pack-order >out &&
+		test_grep "Nothing new to pack" out
+	)
+'
+
 test_expect_success '--geometric with small- and large-pack rollup' '
 	git init geometric &&
 	test_when_finished "rm -fr geometric" &&
