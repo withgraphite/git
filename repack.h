@@ -102,6 +102,8 @@ struct pack_geometry {
 	struct packed_git **pack;
 	uint32_t pack_nr, pack_alloc;
 	uint32_t split;
+	uint32_t split_limit;
+	int split_limit_enabled;
 
 	struct packed_git **promisor_pack;
 	uint32_t promisor_pack_nr, promisor_pack_alloc;
@@ -119,6 +121,8 @@ void pack_geometry_repack_promisors(struct repository *repo,
 void pack_geometry_init(struct pack_geometry *geometry,
 			struct existing_packs *existing,
 			const struct pack_objects_args *args);
+void pack_geometry_reorder_by_pack_order(struct pack_geometry *geometry,
+					 const struct string_list *pack_order);
 void pack_geometry_split(struct pack_geometry *geometry);
 struct packed_git *pack_geometry_preferred_pack(struct pack_geometry *geometry);
 void pack_geometry_remove_redundant(struct pack_geometry *geometry,

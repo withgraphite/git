@@ -135,6 +135,41 @@ static void remove_new_packs(struct repository *repo, const char *packdir,
 	strbuf_release(&buf);
 }
 
+static void read_geometric_pack_order(FILE *fp, const char *source,
+				      int close_file, struct string_list *pack_order)
+{
+	struct strbuf line = STRBUF_INIT;
+
+	while (strbuf_getline(&line, fp) != EOF) {
+		strbuf_trim(&line);
+		if (!line.len)
+			continue;
+
+		if (unsorted_string_list_has_string(pack_order, line.buf))
+			die(_("pack '%s' appears multiple times in pack order input '%s'"),
+			    line.buf, source);
+		string_list_append(pack_order, line.buf);
+	}
+
+	if (ferror(fp))
+		die_errno(_("error reading pack order input '%s'"), source);
+	if (close_file && fclose(fp))
+		die_errno(_("error closing pack order input '%s'"), source);
+	if (!pack_order->nr)
+		die(_("pack order input '%s' must list at least one pack"), source);
+
+	strbuf_release(&line);
+}
+
+static void read_geometric_pack_order_arg(const char *path,
+					  struct string_list *pack_order)
+{
+	if (!strcmp(path, "-"))
+		read_geometric_pack_order(stdin, "stdin", 0, pack_order);
+	else
+		read_geometric_pack_order(xfopen(path, "r"), path, 1, pack_order);
+}
+
 int cmd_repack(int argc,
 	       const char **argv,
 	       const char *prefix,
@@ -146,6 +181,7 @@ int cmd_repack(int argc,
 	struct string_list existing_pack_names = STRING_LIST_INIT_DUP;
 	struct string_list repack_event_inputs = STRING_LIST_INIT_DUP;
 	struct string_list repack_event_outputs = STRING_LIST_INIT_DUP;
+	struct string_list geometric_pack_order = STRING_LIST_INIT_DUP;
 	struct existing_packs existing = EXISTING_PACKS_INIT;
 	struct pack_geometry geometry = { 0 };
 	struct tempfile *refs_snapshot = NULL;
@@ -169,6 +205,7 @@ int cmd_repack(int argc,
 	const char *opt_window_memory = NULL;
 	const char *opt_depth = NULL;
 	const char *opt_threads = NULL;
+	const char *geometric_pack_order_file = NULL;
 	unsigned long combine_cruft_below_size = 0ul;
 	int print_repack_events = 0;
 
@@ -228,6 +265,8 @@ int cmd_repack(int argc,
 				N_("do not repack this pack")),
 		OPT_INTEGER('g', "geometric", &geometry.split_factor,
 			    N_("find a geometric progression with factor <N>")),
+		OPT_FILENAME(0, "geometric-pack-order", &geometric_pack_order_file,
+			     N_("read geometric pack order from file")),
 		OPT_BOOL(0, "print-repack-events", &print_repack_events,
 			 N_("print geometric repack input/output pack hashes")),
 		OPT_BOOL('m', "write-midx", &write_midx,
@@ -264,6 +303,8 @@ int cmd_repack(int argc,
 
 	if (pack_everything & PACK_CRUFT)
 		pack_everything |= ALL_INTO_ONE;
+	if (geometric_pack_order_file && !geometry.split_factor)
+		die(_("option '%s' requires '%s'"), "--geometric-pack-order", "--geometric");
 
 	if (write_bitmaps < 0) {
 		if (!write_midx &&
@@ -314,6 +355,12 @@ int cmd_repack(int argc,
 		if (pack_everything)
 			die(_("options '%s' and '%s' cannot be used together"), "--geometric", "-A/-a");
 		pack_geometry_init(&geometry, &existing, &po_args);
+		if (geometric_pack_order_file) {
+			read_geometric_pack_order_arg(geometric_pack_order_file,
+						      &geometric_pack_order);
+			pack_geometry_reorder_by_pack_order(&geometry,
+							    &geometric_pack_order);
+		}
 		pack_geometry_split(&geometry);
 		if (print_repack_events && geometry.promisor_split)
 			die(_("option '%s' cannot be used when repacking promisor packs"),
@@ -656,6 +703,7 @@ cleanup:
 	string_list_clear(&existing_pack_names, 0);
 	string_list_clear(&repack_event_inputs, 0);
 	string_list_clear(&repack_event_outputs, 0);
+	string_list_clear(&geometric_pack_order, 0);
 	string_list_clear(&names, 1);
 	existing_packs_release(&existing);
 	pack_geometry_release(&geometry);
