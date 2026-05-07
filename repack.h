@@ -122,6 +122,7 @@ void pack_geometry_init(struct pack_geometry *geometry,
 			struct existing_packs *existing,
 			const struct pack_objects_args *args);
 void pack_geometry_reorder_by_pack_order(struct pack_geometry *geometry,
+					 struct existing_packs *existing,
 					 const struct string_list *pack_order);
 void pack_geometry_split(struct pack_geometry *geometry);
 struct packed_git *pack_geometry_preferred_pack(struct pack_geometry *geometry);

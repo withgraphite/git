@@ -211,17 +211,193 @@ test_expect_success '--geometric validates duplicate caller-provided pack order'
 		test_grep "does-not-exist" err &&
 
 		printf "pack-%040d.pack\\n" 0 >missing-order &&
-		git repack --geometric 2 \
-			--geometric-pack-order=missing-order >out &&
-		test_grep "Nothing new to pack" out &&
+		test_must_fail git repack --geometric 2 \
+			--geometric-pack-order=missing-order 2>err &&
+		test_grep "does not match any pack" err &&
 
 		while read sha
 		do
 			touch "$objdir/pack/${sha%.pack}.keep" || exit 1
 		done <pack-order &&
-		git repack --geometric 2 \
-			--geometric-pack-order=pack-order >out &&
-		test_grep "Nothing new to pack" out
+		test_must_fail git repack --geometric 2 \
+			--geometric-pack-order=pack-order 2>err &&
+		test_grep "does not match any pack" err
+	)
+'
+
+test_expect_success '--geometric pack order excludes unlisted packs' '
+	git init geometric-order-excludes &&
+	test_when_finished "rm -fr geometric-order-excludes" &&
+	(
+		cd geometric-order-excludes &&
+
+		test_commit_bulk --start=1 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; >small-1 &&
+		test_commit_bulk --start=2 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f small-1 >small-2 &&
+		test_commit_bulk --start=3 4 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f small-1 |
+			grep -v -f small-2 >medium &&
+		test_commit_bulk --start=7 8 &&
+
+		{
+			cat medium &&
+			cat small-1
+		} >pack-order &&
+
+		git repack --geometric 2 -d --print-repack-events \
+			--geometric-pack-order=- <pack-order >out &&
+
+		grep "^repack " out >events &&
+		test_line_count = 1 events &&
+		sed -n "s/^repack \\(.*\\) into .*/\\1/p" events >actual-inputs &&
+		sed -e "s/^pack-//" -e "s/\\.pack$//" pack-order |
+			tr "\\n" " " |
+			sed "s/ $//" >expect-inputs &&
+		echo >>expect-inputs &&
+		test_cmp expect-inputs actual-inputs &&
+		sed -n "s/^repack .* into \\(.*\\)$/\\1/p" events |
+			tr " " "\\n" >output-shas &&
+		test_line_count = 1 output-shas &&
+		grep -v -f output-shas small-2 >unlisted-after &&
+		while read pack
+		do
+			test_path_is_file "$objdir/pack/$pack" || exit 1
+		done <unlisted-after &&
+		git fsck
+	)
+'
+
+test_expect_success '--geometric pack order skips kept pack in middle' '
+	git init geometric-order-kept-middle &&
+	test_when_finished "rm -fr geometric-order-kept-middle" &&
+	(
+		cd geometric-order-kept-middle &&
+
+		test_commit_bulk --start=1 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; >pack-1 &&
+		test_commit_bulk --start=2 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 >pack-2 &&
+		test_commit_bulk --start=3 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 >pack-3 &&
+		test_commit_bulk --start=4 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 |
+			grep -v -f pack-3 >pack-4 &&
+		test_commit_bulk --start=5 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 |
+			grep -v -f pack-3 |
+			grep -v -f pack-4 >pack-5 &&
+
+		cat pack-1 pack-2 pack-3 pack-4 pack-5 >pack-order &&
+		middle_pack=$(cat pack-3) &&
+		touch "$objdir/pack/${middle_pack%.pack}.keep" &&
+
+		git repack --geometric 2 -d --pack-kept-objects \
+			--print-repack-events \
+			--geometric-pack-order=- <pack-order >out &&
+
+		grep "^repack " out >events &&
+		test_line_count = 1 events &&
+		sed -n "s/^repack \\(.*\\) into .*/\\1/p" events >actual-inputs &&
+		cat pack-4 pack-5 |
+			sed -e "s/^pack-//" -e "s/\\.pack$//" |
+			tr "\\n" " " |
+			sed "s/ $//" >expect-inputs &&
+		echo >>expect-inputs &&
+		test_cmp expect-inputs actual-inputs &&
+		test_path_is_file "$objdir/pack/$middle_pack" &&
+		test_path_is_file "$objdir/pack/${middle_pack%.pack}.keep" &&
+		test_path_is_file "$objdir/pack/$(cat pack-1)" &&
+		test_path_is_file "$objdir/pack/$(cat pack-2)" &&
+		git fsck
+	)
+'
+
+test_expect_success '--geometric pack order treats --keep-pack as boundary' '
+	git init geometric-order-keep-pack-middle &&
+	test_when_finished "rm -fr geometric-order-keep-pack-middle" &&
+	(
+		cd geometric-order-keep-pack-middle &&
+
+		test_commit_bulk --start=1 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; >pack-1 &&
+		test_commit_bulk --start=2 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 >pack-2 &&
+		test_commit_bulk --start=3 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 >pack-3 &&
+		test_commit_bulk --start=4 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 |
+			grep -v -f pack-3 >pack-4 &&
+		test_commit_bulk --start=5 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 |
+			grep -v -f pack-3 |
+			grep -v -f pack-4 >pack-5 &&
+
+		cat pack-1 pack-2 pack-3 pack-4 pack-5 >pack-order &&
+		middle_pack=$(cat pack-3) &&
+
+		git repack --geometric 2 -d --pack-kept-objects \
+			--keep-pack="$middle_pack" \
+			--print-repack-events \
+			--geometric-pack-order=- <pack-order >out &&
+
+		grep "^repack " out >events &&
+		test_line_count = 1 events &&
+		sed -n "s/^repack \\(.*\\) into .*/\\1/p" events >actual-inputs &&
+		cat pack-4 pack-5 |
+			sed -e "s/^pack-//" -e "s/\\.pack$//" |
+			tr "\\n" " " |
+			sed "s/ $//" >expect-inputs &&
+		echo >>expect-inputs &&
+		test_cmp expect-inputs actual-inputs &&
+		test_path_is_file "$objdir/pack/$middle_pack" &&
+		test_path_is_file "$objdir/pack/$(cat pack-1)" &&
+		test_path_is_file "$objdir/pack/$(cat pack-2)" &&
+		git fsck
+	)
+'
+
+test_expect_success '--geometric pack order with all listed packs kept emits no rollup' '
+	git init geometric-order-all-kept &&
+	test_when_finished "rm -fr geometric-order-all-kept" &&
+	(
+		cd geometric-order-all-kept &&
+
+		test_commit_bulk --start=1 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; >pack-1 &&
+		test_commit_bulk --start=2 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 >pack-2 &&
+		cat pack-1 pack-2 >pack-order &&
+		while read pack
+		do
+			touch "$objdir/pack/${pack%.pack}.keep" || exit 1
+		done <pack-order &&
+
+		git repack --geometric 2 -d --pack-kept-objects \
+			--print-repack-events \
+			--geometric-pack-order=- <pack-order >out &&
+
+		test_grep "Nothing new to pack" out &&
+		grep "^repack " out >events || : &&
+		test_must_be_empty events &&
+		git fsck
 	)
 '
 

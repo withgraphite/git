@@ -359,6 +359,7 @@ int cmd_repack(int argc,
 			read_geometric_pack_order_arg(geometric_pack_order_file,
 						      &geometric_pack_order);
 			pack_geometry_reorder_by_pack_order(&geometry,
+							    &existing,
 							    &geometric_pack_order);
 		}
 		pack_geometry_split(&geometry);

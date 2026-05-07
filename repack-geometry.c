@@ -89,53 +89,67 @@ void pack_geometry_init(struct pack_geometry *geometry,
 }
 
 void pack_geometry_reorder_by_pack_order(struct pack_geometry *geometry,
+					 struct existing_packs *existing,
 					 const struct string_list *pack_order)
 {
 	struct packed_git **ordered;
-	unsigned char *selected;
+	struct strbuf base = STRBUF_INIT;
 	uint32_t ordered_nr = 0;
 	uint32_t ordered_limit;
+	uint32_t best_start = 0, best_end = 0, run_start = 0;
+	uint32_t run_len;
 
 	if (!pack_order->nr)
 		die(_("pack order file must list at least one pack"));
 
-	CALLOC_ARRAY(selected, geometry->pack_nr);
 	ALLOC_ARRAY(ordered, geometry->pack_nr);
 
 	for (size_t i = 0; i < pack_order->nr; i++) {
 		const char *want = pack_order->items[i].string;
-		uint32_t found = geometry->pack_nr;
 
 		for (uint32_t j = 0; j < geometry->pack_nr; j++) {
 			if (!strcmp(pack_basename(geometry->pack[j]), want)) {
-				found = j;
+				ordered[ordered_nr++] = geometry->pack[j];
 				break;
 			}
 		}
-
-		if (found == geometry->pack_nr)
-			continue;
-		if (selected[found])
-			die(_("pack '%s' appears multiple times in pack order file"), want);
-
-		selected[found] = 1;
-		ordered[ordered_nr++] = geometry->pack[found];
 	}
 	ordered_limit = ordered_nr;
 
-	for (uint32_t i = 0; i < geometry->pack_nr; i++) {
-		if (!selected[i])
-			ordered[ordered_nr++] = geometry->pack[i];
-	}
+	if (!ordered_nr)
+		die(_("pack order file does not match any pack"));
 
-	if (ordered_nr != geometry->pack_nr)
-		BUG("reordered pack geometry lost packs");
+	for (uint32_t i = 0; i <= ordered_limit; i++) {
+		int boundary = (i == ordered_limit);
+
+		if (!boundary) {
+			strbuf_reset(&base);
+			strbuf_addstr(&base, pack_basename(ordered[i]));
+			strbuf_strip_suffix(&base, ".pack");
+			boundary = string_list_has_string(&existing->kept_packs,
+							  base.buf);
+		}
+
+		if (boundary) {
+			if (i - run_start >= best_end - best_start) {
+				best_start = run_start;
+				best_end = i;
+			}
+			run_start = i + 1;
+		}
+	}
+	strbuf_release(&base);
+
+	run_len = best_end - best_start;
+	MOVE_ARRAY(ordered, ordered + best_start, run_len);
+	REALLOC_ARRAY(ordered, run_len);
 
 	free(geometry->pack);
 	geometry->pack = ordered;
-	geometry->split_limit = ordered_limit;
+	geometry->pack_nr = run_len;
+	geometry->pack_alloc = run_len;
+	geometry->split_limit = run_len;
 	geometry->split_limit_enabled = 1;
-	free(selected);
 }
 
 static uint32_t compute_pack_geometry_split(struct packed_git **pack, size_t pack_nr,
