@@ -322,6 +322,58 @@ test_expect_success '--geometric pack order skips kept pack in middle' '
 	)
 '
 
+test_expect_success '--geometric pack order with kept boundary keeps MIDX bitmap closure' '
+	git init geometric-order-kept-middle-bitmap &&
+	test_when_finished "rm -fr geometric-order-kept-middle-bitmap" &&
+	(
+		cd geometric-order-kept-middle-bitmap &&
+
+		test_commit_bulk --start=1 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; >pack-1 &&
+		test_commit_bulk --start=2 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 >pack-2 &&
+		test_commit_bulk --start=3 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 >pack-3 &&
+		test_commit_bulk --start=4 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 |
+			grep -v -f pack-3 >pack-4 &&
+		test_commit_bulk --start=5 1 &&
+		find $objdir/pack -name "*.pack" -exec basename {} \; |
+			grep -v -f pack-1 |
+			grep -v -f pack-2 |
+			grep -v -f pack-3 |
+			grep -v -f pack-4 >pack-5 &&
+
+		cat pack-1 pack-2 pack-3 pack-4 pack-5 >pack-order &&
+		middle_pack=$(cat pack-3) &&
+		touch "$objdir/pack/${middle_pack%.pack}.keep" &&
+
+		git repack --geometric 2 -d --pack-kept-objects \
+			--write-midx --write-bitmap-index \
+			--print-repack-events \
+			--geometric-pack-order=- <pack-order >out 2>err &&
+		test_must_be_empty err &&
+		test_path_is_file "$objdir/pack/multi-pack-index" &&
+		ls "$objdir/pack"/multi-pack-index-*.bitmap >midx-bitmaps &&
+		test_line_count = 1 midx-bitmaps &&
+		while read bitmap
+		do
+			test_path_is_file "$bitmap" || exit 1
+		done <midx-bitmaps &&
+		test_path_is_file "$objdir/pack/$(cat pack-1)" &&
+		test_path_is_file "$objdir/pack/$(cat pack-2)" &&
+		git fsck &&
+		git rev-list --use-bitmap-index --count --all >count &&
+		echo 5 >expect-count &&
+		test_cmp expect-count count
+	)
+'
+
 test_expect_success '--geometric pack order treats --keep-pack as boundary' '
 	git init geometric-order-keep-pack-middle &&
 	test_when_finished "rm -fr geometric-order-keep-pack-middle" &&
