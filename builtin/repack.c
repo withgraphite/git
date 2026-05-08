@@ -208,6 +208,7 @@ int cmd_repack(int argc,
 	const char *geometric_pack_order_file = NULL;
 	unsigned long combine_cruft_below_size = 0ul;
 	int print_repack_events = 0;
+	int geometric_closure = 0;
 
 	struct option builtin_repack_options[] = {
 		OPT_BIT('a', NULL, &pack_everything,
@@ -267,6 +268,8 @@ int cmd_repack(int argc,
 			    N_("find a geometric progression with factor <N>")),
 		OPT_FILENAME(0, "geometric-pack-order", &geometric_pack_order_file,
 			     N_("read geometric pack order from file")),
+		OPT_BOOL(0, "geometric-closure", &geometric_closure,
+			 N_("make geometric repack outputs closed under reachability")),
 		OPT_BOOL(0, "print-repack-events", &print_repack_events,
 			 N_("print geometric repack input/output pack hashes")),
 		OPT_BOOL('m', "write-midx", &write_midx,
@@ -305,6 +308,8 @@ int cmd_repack(int argc,
 		pack_everything |= ALL_INTO_ONE;
 	if (geometric_pack_order_file && !geometry.split_factor)
 		die(_("option '%s' requires '%s'"), "--geometric-pack-order", "--geometric");
+	if (geometric_closure && !geometry.split_factor)
+		die(_("option '%s' requires '%s'"), "--geometric-closure", "--geometric");
 
 	if (write_bitmaps < 0) {
 		if (!write_midx &&
@@ -434,7 +439,9 @@ int cmd_repack(int argc,
 		pack_geometry_repack_promisors(repo, &po_args, &geometry,
 					       &names, packtmp);
 
-		if (midx_must_contain_cruft)
+		if (geometric_closure)
+			strvec_push(&cmd.args, "--stdin-packs=closure");
+		else if (midx_must_contain_cruft)
 			strvec_push(&cmd.args, "--stdin-packs");
 		else
 			strvec_push(&cmd.args, "--stdin-packs=follow");
@@ -463,27 +470,32 @@ int cmd_repack(int argc,
 		FILE *in = xfdopen(cmd.in, "w");
 		/*
 		 * The resulting pack should contain all objects in packs that
-		 * are going to be rolled up, but exclude objects in packs which
-		 * are being left alone.
+		 * are going to be rolled up. Outside closure mode we also list
+		 * the packs that are being left alone, so pack-objects can
+		 * exclude their objects from the new pack. In closure mode the
+		 * new pack must be self-contained, so we deliberately don't
+		 * tell pack-objects about unselected packs at all.
 		 */
 		for (i = 0; i < geometry.split; i++)
 			fprintf(in, "%s\n", pack_basename(geometry.pack[i]));
-		for (i = geometry.split; i < geometry.pack_nr; i++) {
-			const char *basename = pack_basename(geometry.pack[i]);
-			char marker = '^';
+		if (!geometric_closure) {
+			for (i = geometry.split; i < geometry.pack_nr; i++) {
+				const char *basename = pack_basename(geometry.pack[i]);
+				char marker = '^';
 
-			if (!midx_must_contain_cruft &&
-			    !string_list_has_string(&existing.midx_packs,
-						    basename)) {
-				/*
-				 * Assume non-MIDX'd packs are not
-				 * necessarily closed under
-				 * reachability.
-				 */
-				marker = '!';
+				if (!midx_must_contain_cruft &&
+				    !string_list_has_string(&existing.midx_packs,
+							    basename)) {
+					/*
+					 * Assume non-MIDX'd packs are not
+					 * necessarily closed under
+					 * reachability.
+					 */
+					marker = '!';
+				}
+
+				fprintf(in, "%c%s\n", marker, basename);
 			}
-
-			fprintf(in, "%c%s\n", marker, basename);
 		}
 		fclose(in);
 	}

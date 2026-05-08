@@ -16,6 +16,41 @@ packed_objects () {
 	rm tmp-object-list
  }
 
+setup_closure_repack_repo () {
+	repo=$1 &&
+	git init "$repo" &&
+	(
+		cd "$repo" &&
+		git config set maintenance.auto false &&
+
+		test_commit base &&
+		base_pack=$(echo refs/tags/base | git pack-objects --revs $packdir/pack) &&
+		git prune-packed &&
+
+		test_commit child &&
+		git rev-parse HEAD >../"$repo.child" &&
+		child_pack=$(echo refs/tags/base..refs/tags/child | git pack-objects --revs $packdir/pack) &&
+		git prune-packed &&
+
+		printf "pack-%s.pack\n" "$child_pack" >pack-order
+	)
+}
+
+restore_repack_outputs () {
+	source_repo=$1 &&
+	restore_repo=$2 &&
+	child_oid=$3 &&
+
+	git init --bare "$restore_repo" &&
+	mkdir -p "$restore_repo/objects/pack" &&
+	while read sha
+	do
+		cp "$source_repo/$packdir/pack-$sha.pack" "$restore_repo/objects/pack/" &&
+		cp "$source_repo/$packdir/pack-$sha.idx" "$restore_repo/objects/pack/" || return 1
+	done <"$source_repo/output-shas" &&
+	git -C "$restore_repo" update-ref refs/heads/main "$child_oid"
+}
+
 test_expect_success '--geometric with no packs' '
 	git init geometric &&
 	test_when_finished "rm -fr geometric" &&
@@ -146,6 +181,36 @@ test_expect_success '--geometric prints repack events' '
 			test_path_is_file "$objdir/pack/pack-$sha.pack" || exit 1
 		done <output-shas
 	)
+'
+
+test_expect_success '--geometric-closure makes printed outputs independently restorable' '
+	test_when_finished "rm -fr geometric-open geometric-closed restore-open restore-closed geometric-open.child geometric-closed.child" &&
+
+	setup_closure_repack_repo geometric-open &&
+	(
+		cd geometric-open &&
+		git repack --geometric 2 -d --print-repack-events \
+			--geometric-pack-order=- <pack-order >out &&
+		grep "^repack " out >events &&
+		sed -n "s/^repack .* into \\(.*\\)$/\\1/p" events |
+			tr " " "\\n" >output-shas
+	) &&
+	restore_repack_outputs geometric-open restore-open "$(cat geometric-open.child)" &&
+	test_must_fail git -C restore-open fsck --connectivity-only --no-dangling &&
+
+	setup_closure_repack_repo geometric-closed &&
+	(
+		cd geometric-closed &&
+		git repack --geometric 2 -d --geometric-closure \
+			--print-repack-events \
+			--geometric-pack-order=- <pack-order >out &&
+		grep "^repack " out >events &&
+		sed -n "s/^repack .* into \\(.*\\)$/\\1/p" events |
+			tr " " "\\n" >output-shas
+	) &&
+	restore_repack_outputs geometric-closed restore-closed "$(cat geometric-closed.child)" &&
+	git -C restore-closed fsck --connectivity-only --no-dangling &&
+	git -C restore-closed commit-graph write --reachable
 '
 
 test_expect_success '--geometric can use caller-provided pack order' '

@@ -321,6 +321,70 @@ test_expect_success '--stdin-packs=follow walks into unknown packs' '
 	)
 '
 
+test_expect_success '--stdin-packs=closure includes dependencies from outside the input set' '
+	test_when_finished "rm -fr repo" &&
+
+	git init repo &&
+	(
+		cd repo &&
+		git config set maintenance.auto false &&
+
+		test_commit A &&
+		test_commit B &&
+
+		A="$(echo A | git pack-objects --revs $packdir/pack)" &&
+		B="$(echo A..B | git pack-objects --revs $packdir/pack)" &&
+		git prune-packed &&
+
+		# Standard mode listed with B excluded: only objects from B
+		# end up in the new pack.
+		cat >standard-in <<-EOF &&
+		pack-$B.pack
+		^pack-$A.pack
+		EOF
+		P=$(git pack-objects --stdin-packs $packdir/standard <standard-in) &&
+		objects_in_packs $B >expect &&
+		git show-index <"$packdir/standard-$P.idx" >actual.raw &&
+		cut -d" " -f2 <actual.raw | sort >actual &&
+		test_cmp expect actual &&
+
+		# Closure mode given just B pulls in As objects too, because
+		# Bs commits/trees reach back into pack A.
+		echo "pack-$B.pack" >closure-in &&
+		P=$(git pack-objects --stdin-packs=closure $packdir/pack <closure-in) &&
+		objects_in_packs $A $B >expect &&
+		objects_in_packs $P >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success '--stdin-packs=closure rejects pack exclusion markers' '
+	test_when_finished "rm -fr repo" &&
+
+	git init repo &&
+	(
+		cd repo &&
+		git config set maintenance.auto false &&
+
+		test_commit A &&
+		test_commit B &&
+
+		A="$(echo A | git pack-objects --revs $packdir/pack)" &&
+		B="$(echo A..B | git pack-objects --revs $packdir/pack)" &&
+		git prune-packed &&
+
+		printf "pack-%s.pack\n^pack-%s.pack\n" "$B" "$A" >caret-in &&
+		test_must_fail git pack-objects --stdin-packs=closure --stdout \
+			>/dev/null <caret-in 2>err &&
+		test_grep "does not support pack exclusion markers" err &&
+
+		printf "pack-%s.pack\n!pack-%s.pack\n" "$B" "$A" >bang-in &&
+		test_must_fail git pack-objects --stdin-packs=closure --stdout \
+			>/dev/null <bang-in 2>err &&
+		test_grep "does not support pack exclusion markers" err
+	)
+'
+
 test_expect_success '--stdin-packs with promisors' '
 	test_when_finished "rm -fr repo" &&
 	git init repo &&
