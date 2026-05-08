@@ -290,6 +290,7 @@ enum stdin_packs_mode {
 	STDIN_PACKS_MODE_NONE,
 	STDIN_PACKS_MODE_STANDARD,
 	STDIN_PACKS_MODE_FOLLOW,
+	STDIN_PACKS_MODE_CLOSURE,
 };
 
 /**
@@ -3757,11 +3758,17 @@ static int git_pack_config(const char *k, const char *v,
 static int stdin_packs_found_nr;
 static int stdin_packs_hints_nr;
 
+struct stdin_packs_data {
+	struct rev_info *revs;
+	enum stdin_packs_mode mode;
+};
+
 static int add_object_entry_from_pack(const struct object_id *oid,
 				      struct packed_git *p,
 				      uint32_t pos,
 				      void *_data)
 {
+	struct stdin_packs_data *data = _data;
 	off_t ofs;
 	struct object_info oi = OBJECT_INFO_INIT;
 	enum object_type type = OBJ_NONE;
@@ -3779,11 +3786,14 @@ static int add_object_entry_from_pack(const struct object_id *oid,
 	if (packed_object_info(p, ofs, &oi) < 0) {
 		die(_("could not get type of object %s in pack %s"),
 		    oid_to_hex(oid), p->pack_name);
-	} else if (type == OBJ_COMMIT) {
-		struct rev_info *revs = _data;
+	} else if (type == OBJ_COMMIT ||
+		   (type != OBJ_BLOB &&
+		    data->mode == STDIN_PACKS_MODE_CLOSURE)) {
 		/*
-		 * commits in included packs are used as starting points
-		 * for the subsequent revision walk
+		 * Commits in included packs are used as starting points
+		 * for the subsequent revision walk. In closure mode, trees
+		 * and tags are also used as roots so that a selected pack's
+		 * non-commit objects do not point outside the output pack set.
 		 *
 		 * Note that we do want to walk through commits that are
 		 * present in excluded-open ('!') packs to pick up any
@@ -3793,7 +3803,7 @@ static int add_object_entry_from_pack(const struct object_id *oid,
 		 * However, we'll only add those objects to the packing
 		 * list after checking `want_object_in_pack()` below.
 		 */
-		add_pending_oid(revs, NULL, oid, 0);
+		add_pending_oid(data->revs, NULL, oid, 0);
 	}
 
 	if (!want_object_in_pack(oid, 0, &p, &ofs))
@@ -3808,8 +3818,10 @@ static void show_object_pack_hint(struct object *object, const char *name,
 				  void *data)
 {
 	enum stdin_packs_mode mode = *(enum stdin_packs_mode *)data;
-	if (mode == STDIN_PACKS_MODE_FOLLOW) {
-		if (object->type == OBJ_BLOB &&
+	if (mode == STDIN_PACKS_MODE_FOLLOW ||
+	    mode == STDIN_PACKS_MODE_CLOSURE) {
+		if (mode == STDIN_PACKS_MODE_FOLLOW &&
+		    object->type == OBJ_BLOB &&
 		    !odb_has_object(the_repository->objects, &object->oid, 0))
 			return;
 		add_object_entry(&object->oid, object->type, name, 0);
@@ -3839,7 +3851,8 @@ static void show_commit_pack_hint(struct commit *commit, void *data)
 {
 	enum stdin_packs_mode mode = *(enum stdin_packs_mode *)data;
 
-	if (mode == STDIN_PACKS_MODE_FOLLOW) {
+	if (mode == STDIN_PACKS_MODE_FOLLOW ||
+	    mode == STDIN_PACKS_MODE_CLOSURE) {
 		show_object_pack_hint((struct object *)commit, "", data);
 		return;
 	}
@@ -3866,6 +3879,9 @@ static void show_commit_pack_hint(struct commit *commit, void *data)
  * Objects in packs whose 'kind' bits include STDIN_PACK_INCLUDE or
  * STDIN_PACK_EXCLUDE_OPEN are used as traversal tips when invoked
  * with --stdin-packs=follow.
+ *
+ * --stdin-packs=closure rejects '^' and '!' markers entirely and
+ * produces a pack closed under reachability from the included packs.
  */
 enum stdin_pack_info_kind {
 	STDIN_PACK_INCLUDE = (1<<0),
@@ -3907,8 +3923,10 @@ static int stdin_packs_include_check(struct commit *commit, void *data)
 }
 
 static void stdin_packs_add_pack_entries(struct strmap *packs,
-					 struct rev_info *revs)
+					 struct rev_info *revs,
+					 enum stdin_packs_mode mode)
 {
+	struct stdin_packs_data data = { .revs = revs, .mode = mode };
 	struct string_list keys = STRING_LIST_INIT_NODUP;
 	struct string_list_item *item;
 	struct hashmap_iter iter;
@@ -3947,7 +3965,7 @@ static void stdin_packs_add_pack_entries(struct strmap *packs,
 		    (info->kind & STDIN_PACK_EXCLUDE_OPEN))
 			for_each_object_in_pack(info->p,
 						add_object_entry_from_pack,
-						revs,
+						&data,
 						ODB_FOR_EACH_OBJECT_PACK_ORDER);
 	}
 
@@ -3968,7 +3986,10 @@ static void stdin_packs_read_input(struct rev_info *revs,
 
 		if (!*key)
 			continue;
-		else if (*key == '^')
+		if (mode == STDIN_PACKS_MODE_CLOSURE &&
+		    (*key == '^' || *key == '!'))
+			die(_("--stdin-packs=closure does not support pack exclusion markers"));
+		if (*key == '^')
 			kind = STDIN_PACK_EXCLUDE_CLOSED;
 		else if (*key == '!' && mode == STDIN_PACKS_MODE_FOLLOW)
 			kind = STDIN_PACK_EXCLUDE_OPEN;
@@ -4035,7 +4056,7 @@ static void stdin_packs_read_input(struct rev_info *revs,
 		info->p = p;
 	}
 
-	stdin_packs_add_pack_entries(&packs, revs);
+	stdin_packs_add_pack_entries(&packs, revs, mode);
 
 	strbuf_release(&buf);
 	strmap_clear(&packs, 1);
@@ -4070,7 +4091,7 @@ static void read_stdin_packs(enum stdin_packs_mode mode, int rev_list_unpacked)
 	revs.blob_objects = 1;
 	revs.tree_objects = 1;
 	revs.tag_objects = 1;
-	revs.ignore_missing_links = 1;
+	revs.ignore_missing_links = mode != STDIN_PACKS_MODE_CLOSURE;
 	revs.exclude_promisor_objects = exclude_promisor_objects;
 
 	/* avoids adding objects in excluded packs */
@@ -4983,6 +5004,8 @@ static int parse_stdin_packs_mode(const struct option *opt, const char *arg,
 		*mode = STDIN_PACKS_MODE_STANDARD;
 	else if (!strcmp(arg, "follow"))
 		*mode = STDIN_PACKS_MODE_FOLLOW;
+	else if (!strcmp(arg, "closure"))
+		*mode = STDIN_PACKS_MODE_CLOSURE;
 	else
 		die(_("invalid value for '%s': '%s'"), opt->long_name, arg);
 
