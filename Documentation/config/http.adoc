@@ -297,6 +297,12 @@ http.lowSpeedTime::
 	Can be overridden by the `GIT_HTTP_LOW_SPEED_LIMIT` and
 	`GIT_HTTP_LOW_SPEED_TIME` environment variables.
 
+http.connectTimeout::
+	Specifies how long, in seconds, to allow the HTTP connection phase
+	to complete before aborting the transfer. This includes DNS,
+	TCP, and TLS connection setup. Can be overridden by the
+	`GIT_HTTP_CONNECT_TIMEOUT` environment variable.
+
 http.keepAliveIdle::
 	Specifies how long in seconds to wait on an idle connection
 	before sending TCP keepalive probes (if supported by the OS). If
