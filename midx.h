@@ -138,6 +138,12 @@ int write_midx_file_only(struct odb_source *source,
 			 const char *refs_snapshot,
 			 const char *incremental_base,
 			 unsigned flags);
+int write_midx_file_batched(struct odb_source *source,
+			    struct string_list *packs_to_include,
+			    const char *preferred_pack_name,
+			    const char *refs_snapshot,
+			    uint32_t max_objects_per_layer,
+			    unsigned flags);
 int write_midx_file_compact(struct odb_source *source,
 			    struct multi_pack_index *from,
 			    struct multi_pack_index *to,

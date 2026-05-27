@@ -17,7 +17,7 @@
 	N_("git multi-pack-index [<options>] write [--preferred-pack=<pack>]\n" \
 	   "  [--[no-]bitmap] [--[no-]incremental] [--[no-]stdin-packs]\n" \
 	   "  [--refs-snapshot=<path>] [--[no-]write-chain-file]\n" \
-	   "  [--base=<checksum>]")
+	   "  [--base=<checksum>] [--max-objects-per-layer=<n>]")
 
 #define BUILTIN_MIDX_COMPACT_USAGE \
 	N_("git multi-pack-index [<options>] compact [--[no-]incremental]\n" \
@@ -68,6 +68,7 @@ static struct opts_multi_pack_index {
 	const char *incremental_base;
 	char *refs_snapshot;
 	unsigned long batch_size;
+	unsigned long max_objects_per_layer;
 	unsigned flags;
 	int stdin_packs;
 } opts;
@@ -165,6 +166,9 @@ static int cmd_multi_pack_index_write(int argc, const char **argv,
 			 N_("write multi-pack index containing only given indexes")),
 		OPT_FILENAME(0, "refs-snapshot", &opts.refs_snapshot,
 			     N_("refs snapshot for selecting bitmap commits")),
+		OPT_UNSIGNED(0, "max-objects-per-layer",
+			     &opts.max_objects_per_layer,
+			     N_("write incremental MIDX layers with at most this many objects each")),
 		OPT_END(),
 	};
 	struct odb_source *source;
@@ -195,6 +199,25 @@ static int cmd_multi_pack_index_write(int argc, const char **argv,
 				   options);
 	}
 
+	if (opts.max_objects_per_layer) {
+		if (opts.incremental_base) {
+			error(_("cannot use --max-objects-per-layer with --base"));
+			usage_with_options(builtin_multi_pack_index_write_usage,
+					   options);
+		}
+		if (opts.flags & MIDX_WRITE_NO_CHAIN) {
+			error(_("cannot use --max-objects-per-layer with --no-write-chain-file"));
+			usage_with_options(builtin_multi_pack_index_write_usage,
+					   options);
+		}
+		if (opts.max_objects_per_layer > UINT32_MAX) {
+			error(_("--max-objects-per-layer is too large"));
+			usage_with_options(builtin_multi_pack_index_write_usage,
+					   options);
+		}
+		opts.flags |= MIDX_WRITE_INCREMENTAL;
+	}
+
 	if (opts.incremental_base &&
 	    !(opts.flags & MIDX_WRITE_NO_CHAIN)) {
 		error(_("cannot use --base without --no-write-chain-file"));
@@ -205,6 +228,31 @@ static int cmd_multi_pack_index_write(int argc, const char **argv,
 	source = handle_object_dir_option(repo);
 
 	FREE_AND_NULL(options);
+
+	if (opts.max_objects_per_layer) {
+		if (opts.stdin_packs) {
+			struct string_list packs = STRING_LIST_INIT_DUP;
+
+			read_packs_from_stdin(&packs);
+
+			ret = write_midx_file_batched(source, &packs,
+						      opts.preferred_pack,
+						      opts.refs_snapshot,
+						      (uint32_t)opts.max_objects_per_layer,
+						      opts.flags);
+
+			string_list_clear(&packs, 0);
+		} else {
+			ret = write_midx_file_batched(source, NULL,
+						      opts.preferred_pack,
+						      opts.refs_snapshot,
+						      (uint32_t)opts.max_objects_per_layer,
+						      opts.flags);
+		}
+
+		free(opts.refs_snapshot);
+		return ret;
+	}
 
 	if (opts.stdin_packs) {
 		struct string_list packs = STRING_LIST_INIT_DUP;

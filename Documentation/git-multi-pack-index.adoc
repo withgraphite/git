@@ -12,7 +12,7 @@ SYNOPSIS
 'git multi-pack-index' [<options>] write [--preferred-pack=<pack>]
 		         [--[no-]bitmap] [--[no-]incremental] [--[no-]stdin-packs]
 		         [--refs-snapshot=<path>] [--[no-]write-chain-file]
-			 [--base=<checksum>]
+			 [--base=<checksum>] [--max-objects-per-layer=<n>]
 'git multi-pack-index' [<options>] compact [--[no-]incremental]
 		         [--[no-]bitmap] [--base=<checksum>] [--[no-]write-chain-file]
 			 <from> <to>
@@ -99,6 +99,18 @@ marker).
 		The special value `none` indicates that the new layer
 		should have no base (i.e., it becomes a root layer).
 		Requires `--no-write-chain-file`.
+
+	--max-objects-per-layer=<n>::
+		Write the new MIDX as a chain of incremental layers,
+		where each layer covers at most `<n>` objects counted
+		across the layer's packs. Implies `--incremental`.
+		Packs are partitioned largest first, and a single pack
+		whose object count exceeds `<n>` is written into a layer
+		of its own. This bounds peak memory when bootstrapping a
+		MIDX over a large set of packs, for example after restoring
+		a repository from a snapshot. This option is incompatible
+		with `--base` and `--no-write-chain-file`, which target
+		single-layer writes.
 --
 
 compact::
@@ -185,6 +197,12 @@ $ git multi-pack-index write --preferred-pack=<pack> --bitmap
 -----------------------------------------------
 $ git multi-pack-index --object-dir <alt> write
 -----------------------------------------------
+
+* Write a MIDX chain in bounded-memory batches, with a bitmap for each layer.
++
+-------------------------------------------------------------
+$ git multi-pack-index write --bitmap --max-objects-per-layer=1000000
+-------------------------------------------------------------
 
 * Verify the MIDX file for the packfiles in the current `.git` directory.
 +

@@ -4,6 +4,7 @@
 #include "hex.h"
 #include "lockfile.h"
 #include "packfile.h"
+#include "pack.h"
 #include "object-file.h"
 #include "hash-lookup.h"
 #include "midx.h"
@@ -1251,6 +1252,136 @@ struct write_midx_opts {
 	unsigned flags;
 };
 
+struct batched_pack {
+	char *idx_name;
+	uint32_t num_objects;
+};
+
+struct batched_pack_collection {
+	struct multi_pack_index *base_midx;
+	struct string_list *packs_to_include;
+	struct batched_pack *packs;
+	size_t nr;
+	size_t alloc;
+	int ret;
+};
+
+static int read_pack_idx_num_objects(const char *idx_path,
+				     uint32_t *num_objects)
+{
+	unsigned char header[8];
+	unsigned char fanout[4];
+	off_t fanout_offset = 255 * sizeof(uint32_t);
+	int fd = git_open(idx_path);
+	int ret = 0;
+
+	if (fd < 0)
+		return error_errno(_("could not open pack-index '%s'"), idx_path);
+
+	if (read_in_full(fd, header, sizeof(header)) != sizeof(header)) {
+		ret = error_errno(_("could not read pack-index header '%s'"),
+				  idx_path);
+		goto cleanup;
+	}
+
+	if (get_be32(header) == PACK_IDX_SIGNATURE) {
+		uint32_t version = get_be32(header + sizeof(uint32_t));
+		if (version != 2) {
+			ret = error(_("pack-index '%s' is version %"PRIu32
+				      " and is not supported"),
+				    idx_path, version);
+			goto cleanup;
+		}
+		fanout_offset += sizeof(header);
+	}
+
+	if (pread_in_full(fd, fanout, sizeof(fanout), fanout_offset) !=
+	    sizeof(fanout)) {
+		ret = error_errno(_("could not read pack-index fanout '%s'"),
+				  idx_path);
+		goto cleanup;
+	}
+
+	*num_objects = get_be32(fanout);
+
+cleanup:
+	close(fd);
+	return ret;
+}
+
+static void collect_candidate_pack(const char *full_path,
+				   size_t full_path_len UNUSED,
+				   const char *file_name,
+				   void *data)
+{
+	struct batched_pack_collection *collection = data;
+	uint32_t num_objects;
+
+	if (collection->ret)
+		return;
+	if (!ends_with(file_name, ".idx"))
+		return;
+	if (collection->base_midx &&
+	    midx_contains_pack(collection->base_midx, file_name))
+		return;
+	if (collection->packs_to_include &&
+	    !string_list_has_string(collection->packs_to_include, file_name))
+		return;
+
+	if (read_pack_idx_num_objects(full_path, &num_objects) < 0) {
+		collection->ret = -1;
+		return;
+	}
+
+	ALLOC_GROW(collection->packs, collection->nr + 1, collection->alloc);
+	collection->packs[collection->nr].idx_name = xstrdup(file_name);
+	collection->packs[collection->nr].num_objects = num_objects;
+	collection->nr++;
+}
+
+static void clear_batched_packs(struct batched_pack *packs, size_t packs_nr)
+{
+	for (size_t i = 0; i < packs_nr; i++)
+		free(packs[i].idx_name);
+	free(packs);
+}
+
+static int collect_candidate_packs(struct odb_source *source,
+				   struct multi_pack_index *base_midx,
+				   struct string_list *packs_to_include,
+				   struct batched_pack **packs,
+				   size_t *packs_nr)
+{
+	struct batched_pack_collection collection = {
+		.base_midx = base_midx,
+		.packs_to_include = packs_to_include,
+	};
+
+	for_each_file_in_pack_dir(source->path, collect_candidate_pack,
+				  &collection);
+
+	if (collection.ret) {
+		clear_batched_packs(collection.packs, collection.nr);
+		return -1;
+	}
+
+	*packs = collection.packs;
+	*packs_nr = collection.nr;
+	return 0;
+}
+
+static int batched_pack_cmp_objects_desc(const void *va, const void *vb)
+{
+	const struct batched_pack *a = va;
+	const struct batched_pack *b = vb;
+
+	if (a->num_objects > b->num_objects)
+		return -1;
+	if (a->num_objects < b->num_objects)
+		return 1;
+	return strcmp(a->idx_name, b->idx_name);
+}
+
 static int write_midx_internal(struct write_midx_opts *opts)
 {
 	struct repository *r = opts->source->odb->repo;
@@ -1879,6 +2010,98 @@ int write_midx_file_only(struct odb_source *source,
 	};
 
 	return write_midx_internal(&opts);
+}
+
+int write_midx_file_batched(struct odb_source *source,
+			    struct string_list *packs_to_include,
+			    const char *preferred_pack_name,
+			    const char *refs_snapshot,
+			    uint32_t max_objects_per_layer,
+			    unsigned flags)
+{
+	struct repository *r = source->odb->repo;
+	struct batched_pack *candidates = NULL;
+	size_t candidates_nr = 0;
+	size_t i = 0;
+	int result = 0;
+
+	if (!max_objects_per_layer)
+		return error(_("--max-objects-per-layer must be greater than zero"));
+	if (flags & MIDX_WRITE_COMPACT)
+		return error(_("--max-objects-per-layer is incompatible with compaction"));
+	if (flags & MIDX_WRITE_NO_CHAIN)
+		return error(_("--max-objects-per-layer is incompatible with --no-write-chain-file"));
+
+	flags |= MIDX_WRITE_INCREMENTAL;
+
+	odb_reprepare(r->objects);
+	if (collect_candidate_packs(source, get_multi_pack_index(source),
+				    packs_to_include, &candidates,
+				    &candidates_nr) < 0)
+		return -1;
+	if (!candidates_nr)
+		goto cleanup;
+
+	QSORT(candidates, candidates_nr, batched_pack_cmp_objects_desc);
+
+	while (i < candidates_nr) {
+		struct string_list batch = STRING_LIST_INIT_DUP;
+		uint64_t batch_objects = 0;
+		int batch_has_preferred_pack = 0;
+		struct write_midx_opts opts;
+
+		do {
+			struct batched_pack *candidate = &candidates[i];
+
+			string_list_append(&batch, candidate->idx_name);
+			if (preferred_pack_name &&
+			    !cmp_idx_or_pack_name(preferred_pack_name,
+						  candidate->idx_name))
+				batch_has_preferred_pack = 1;
+			batch_objects += candidate->num_objects;
+			i++;
+		} while (i < candidates_nr &&
+			 batch_objects + candidates[i].num_objects <=
+			 max_objects_per_layer);
+
+		string_list_sort(&batch);
+
+		memset(&opts, 0, sizeof(opts));
+		opts.source = source;
+		opts.packs_to_include = &batch;
+		opts.preferred_pack_name = batch_has_preferred_pack ?
+			preferred_pack_name : NULL;
+		opts.refs_snapshot = refs_snapshot;
+		opts.flags = flags;
+
+		trace2_region_enter("midx", "write_midx_batched_step", r);
+		trace2_data_intmax("midx", r, "batch:packs",
+				   (intmax_t)batch.nr);
+		trace2_data_intmax("midx", r, "batch:objects",
+				   (intmax_t)batch_objects);
+
+		if (write_midx_internal(&opts) < 0)
+			result = -1;
+
+		string_list_clear(&batch, 0);
+
+		/*
+		 * Reload the object database so the next in-process write sees
+		 * the MIDX layer that the previous iteration just linked into
+		 * the chain file.
+		 */
+		odb_close(r->objects);
+		odb_reprepare(r->objects);
+
+		trace2_region_leave("midx", "write_midx_batched_step", r);
+
+		if (result)
+			break;
+	}
+
+cleanup:
+	clear_batched_packs(candidates, candidates_nr);
+	return result;
 }
 
 int write_midx_file_compact(struct odb_source *source,
