@@ -4,6 +4,7 @@
 #include "config.h"
 #include "environment.h"
 #include "gettext.h"
+#include "parse.h"
 #include "parse-options.h"
 #include "midx.h"
 #include "strbuf.h"
@@ -22,7 +23,7 @@
 #define BUILTIN_MIDX_COMPACT_USAGE \
 	N_("git multi-pack-index [<options>] compact [--[no-]incremental]\n" \
 	   "  [--[no-]bitmap] [--base=<checksum>] [--[no-]write-chain-file]\n" \
-	   "  <from> <to>")
+	   "  [--max-chain-depth=<n> [--split-factor=<n>]] [<from> <to>]")
 
 #define BUILTIN_MIDX_VERIFY_USAGE \
 	N_("git multi-pack-index [<options>] verify")
@@ -68,6 +69,8 @@ static struct opts_multi_pack_index {
 	const char *incremental_base;
 	char *refs_snapshot;
 	unsigned long batch_size;
+	unsigned long max_chain_depth;
+	unsigned long split_factor;
 	unsigned flags;
 	int stdin_packs;
 } opts;
@@ -141,6 +144,20 @@ static void read_packs_from_stdin(struct string_list *to)
 	string_list_sort(to);
 
 	strbuf_release(&buf);
+}
+
+static int parse_positive_ulong(const struct option *opt, const char *arg,
+				int unset)
+{
+	unsigned long *value = opt->value;
+
+	if (unset) {
+		*value = 0;
+		return 0;
+	}
+	if (!arg || !git_parse_ulong(arg, value) || !*value)
+		return error(_("%s must be greater than zero"), opt->long_name);
+	return 0;
 }
 
 static int cmd_multi_pack_index_write(int argc, const char **argv,
@@ -251,6 +268,13 @@ static int cmd_multi_pack_index_compact(int argc, const char **argv,
 		OPT_NEGBIT(0, "write-chain-file", &opts.flags,
 			N_("write the multi-pack-index chain file"),
 			MIDX_WRITE_NO_CHAIN),
+		OPT_CALLBACK(0, "max-chain-depth", &opts.max_chain_depth,
+			     N_("n"),
+			     N_("automatically compact when the chain has more than this many layers"),
+			     parse_positive_ulong),
+		OPT_CALLBACK(0, "split-factor", &opts.split_factor, N_("n"),
+			     N_("with --max-chain-depth, compact adjacent layers according to this split factor"),
+			     parse_positive_ulong),
 		OPT_END(),
 	};
 
@@ -266,9 +290,18 @@ static int cmd_multi_pack_index_compact(int argc, const char **argv,
 			     options, builtin_multi_pack_index_compact_usage,
 			     0);
 
-	if (argc != 2)
+	if (opts.max_chain_depth) {
+		if (argc)
+			usage_with_options(builtin_multi_pack_index_compact_usage,
+					   options);
+	} else if (argc != 2) {
 		usage_with_options(builtin_multi_pack_index_compact_usage,
 				   options);
+	} else if (opts.split_factor) {
+		error(_("cannot use --split-factor without --max-chain-depth"));
+		usage_with_options(builtin_multi_pack_index_compact_usage,
+				   options);
+	}
 
 	if (opts.flags & MIDX_WRITE_NO_CHAIN &&
 	    !(opts.flags & MIDX_WRITE_INCREMENTAL)) {
@@ -278,9 +311,37 @@ static int cmd_multi_pack_index_compact(int argc, const char **argv,
 				   options);
 	}
 
+	if (opts.max_chain_depth) {
+		if (opts.incremental_base) {
+			error(_("cannot use --max-chain-depth with --base"));
+			usage_with_options(builtin_multi_pack_index_compact_usage,
+					   options);
+		}
+		if (opts.flags & MIDX_WRITE_NO_CHAIN) {
+			error(_("cannot use --max-chain-depth with --no-write-chain-file"));
+			usage_with_options(builtin_multi_pack_index_compact_usage,
+					   options);
+		}
+		if (!opts.split_factor)
+			opts.split_factor = 2;
+		if (opts.max_chain_depth > UINT32_MAX ||
+		    opts.split_factor > UINT32_MAX) {
+			error(_("--max-chain-depth and --split-factor must fit in 32 bits"));
+			usage_with_options(builtin_multi_pack_index_compact_usage,
+					   options);
+		}
+		opts.flags |= MIDX_WRITE_INCREMENTAL;
+	}
+
 	source = handle_object_dir_option(the_repository);
 
 	FREE_AND_NULL(options);
+
+	if (opts.max_chain_depth)
+		return compact_midx_chain_auto(source,
+					       (uint32_t)opts.max_chain_depth,
+					       (uint32_t)opts.split_factor,
+					       opts.flags);
 
 	m = get_multi_pack_index(source);
 

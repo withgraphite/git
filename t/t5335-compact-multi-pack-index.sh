@@ -403,4 +403,61 @@ test_expect_success 'MIDX compaction with bogus --base checksum' '
 	)
 '
 
+test_expect_success 'automatic MIDX compaction no-ops below chain depth cap' '
+	git init midx-compact-auto-noop &&
+	(
+		cd midx-compact-auto-noop &&
+
+		git config maintenance.auto false &&
+
+		write_packs A B C &&
+		cp "$midx_chain" "$midx_chain.bak" &&
+
+		git multi-pack-index compact --max-chain-depth=3 &&
+		test_cmp "$midx_chain.bak" "$midx_chain"
+	)
+'
+
+test_expect_success 'automatic MIDX compaction picks and compacts a range' '
+	git init midx-compact-auto &&
+	(
+		cd midx-compact-auto &&
+
+		git config maintenance.auto false &&
+
+		write_packs A B C D E &&
+		test_line_count = 5 "$midx_chain" &&
+
+		git multi-pack-index compact --bitmap \
+			--max-chain-depth=3 --split-factor=2 &&
+		test_line_count = 1 "$midx_chain" &&
+		test_path_is_file "$midxdir/multi-pack-index-$(nth_line 1 "$midx_chain").bitmap" &&
+		git multi-pack-index verify &&
+		test_midx_layer_object_uniqueness
+	)
+'
+
+test_expect_success 'automatic MIDX compaction rejects invalid knobs' '
+	git init midx-compact-auto-invalid &&
+	(
+		cd midx-compact-auto-invalid &&
+
+		write_packs A B &&
+
+		test_must_fail git multi-pack-index compact \
+			--max-chain-depth=0 2>err &&
+		test_grep "max-chain-depth must be greater than zero" err &&
+
+		test_must_fail git multi-pack-index compact \
+			--max-chain-depth=1 --split-factor=0 2>err &&
+		test_grep "split-factor must be greater than zero" err &&
+
+		test_must_fail git multi-pack-index compact \
+			--split-factor=2 \
+			"$(nth_line 1 "$midx_chain")" \
+			"$(nth_line 2 "$midx_chain")" 2>err &&
+		test_grep "cannot use --split-factor without --max-chain-depth" err
+	)
+'
+
 test_done

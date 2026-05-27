@@ -143,6 +143,10 @@ int write_midx_file_compact(struct odb_source *source,
 			    struct multi_pack_index *to,
 			    const char *incremental_base,
 			    unsigned flags);
+int compact_midx_chain_auto(struct odb_source *source,
+			    uint32_t max_chain_depth,
+			    uint32_t split_factor,
+			    unsigned flags);
 void clear_midx_file(struct repository *r);
 void clear_incremental_midx_files(struct repository *r,
 				  const struct strvec *keep_hashes);

@@ -15,7 +15,7 @@ SYNOPSIS
 			 [--base=<checksum>]
 'git multi-pack-index' [<options>] compact [--[no-]incremental]
 		         [--[no-]bitmap] [--base=<checksum>] [--[no-]write-chain-file]
-			 <from> <to>
+			 [--max-chain-depth=<n> [--split-factor=<n>]] [<from> <to>]
 'git multi-pack-index' [<options>] verify
 'git multi-pack-index' [<options>] expire
 'git multi-pack-index' [<options>] repack [--batch-size=<size>]
@@ -125,6 +125,19 @@ compact::
 		as the base for the compacted result, instead of using
 		the immediate parent of `<from>`. The special value
 		`none` indicates that the result should have no base.
+
+	--max-chain-depth=<n>::
+		Automatically choose a MIDX layer range to compact when the
+		current incremental MIDX chain has more than `<n>` layers.
+		If the current chain has at most `<n>` layers, this option
+		exits without writing a new MIDX. Otherwise, adjacent layers
+		are selected from the chain tip according to
+		`--split-factor=<n>` and compacted into a new incremental
+		layer.
+
+	--split-factor=<n>::
+		With `--max-chain-depth`, control how many adjacent layers
+		are merged. Defaults to 2.
 --
 +
 Note that the compact command requires writing a version-2 midx that
