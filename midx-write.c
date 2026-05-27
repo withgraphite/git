@@ -1898,6 +1898,79 @@ int write_midx_file_compact(struct odb_source *source,
 	return write_midx_internal(&opts);
 }
 
+int compact_midx_chain_auto(struct odb_source *source,
+			    uint32_t max_chain_depth,
+			    uint32_t split_factor,
+			    unsigned flags)
+{
+	struct repository *r = source->odb->repo;
+	struct multi_pack_index *m;
+	struct multi_pack_index *from_midx, *to_midx, *next;
+	uint32_t depth = 0;
+	uint32_t compact_objects;
+
+	if (!max_chain_depth)
+		return error(_("--max-chain-depth must be greater than zero"));
+	if (!split_factor)
+		return error(_("--split-factor must be greater than zero"));
+
+	trace2_region_enter("midx", "compact_midx_chain_auto", r);
+
+	odb_reprepare(r->objects);
+	m = get_multi_pack_index(source);
+	for (struct multi_pack_index *cur = m; cur; cur = cur->base_midx)
+		depth++;
+
+	trace2_data_intmax("midx", r, "auto:chain_depth", depth);
+	trace2_data_intmax("midx", r, "auto:max_chain_depth", max_chain_depth);
+	trace2_data_intmax("midx", r, "auto:split_factor", split_factor);
+
+	if (depth <= max_chain_depth) {
+		trace2_data_string("midx", r, "auto:skip", "chain-depth");
+		trace2_region_leave("midx", "compact_midx_chain_auto", r);
+		return 0;
+	}
+	if (!m) {
+		trace2_data_string("midx", r, "auto:skip", "no-midx");
+		trace2_region_leave("midx", "compact_midx_chain_auto", r);
+		return 0;
+	}
+
+	to_midx = m;
+	from_midx = m;
+	compact_objects = m->num_objects;
+	while ((next = from_midx->base_midx)) {
+		if (compact_objects < next->num_objects / split_factor)
+			break;
+		if (unsigned_add_overflows(compact_objects, next->num_objects)) {
+			trace2_region_leave("midx", "compact_midx_chain_auto", r);
+			return error(_("too many objects in automatic MIDX compaction"));
+		}
+		compact_objects += next->num_objects;
+		from_midx = next;
+	}
+
+	if (from_midx == to_midx) {
+		trace2_data_string("midx", r, "auto:skip", "split-factor");
+		trace2_region_leave("midx", "compact_midx_chain_auto", r);
+		return 0;
+	}
+
+	trace2_data_string("midx", r, "auto:from", midx_get_checksum_hex(from_midx));
+	trace2_data_string("midx", r, "auto:to", midx_get_checksum_hex(to_midx));
+	trace2_data_intmax("midx", r, "auto:objects", compact_objects);
+
+	flags |= MIDX_WRITE_INCREMENTAL;
+	/*
+	 * The automatic range selector only chooses an existing contiguous
+	 * suffix of the chain, so the compacted layer naturally uses from's
+	 * immediate base as its base. Custom --base is for explicit callers.
+	 */
+	int ret = write_midx_file_compact(source, from_midx, to_midx, NULL, flags);
+	trace2_region_leave("midx", "compact_midx_chain_auto", r);
+	return ret;
+}
+
 int expire_midx_packs(struct odb_source *source, unsigned flags)
 {
 	uint32_t i, *count, result = 0;
