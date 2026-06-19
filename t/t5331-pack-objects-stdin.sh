@@ -60,6 +60,31 @@ test_expect_success '--stdin-packs with excluded packs' '
 	)
 '
 
+test_expect_success '--stdin-packs=damage-control includes listed packs' '
+	(
+		cd stdin-packs &&
+
+		PACK_A="$(basename .git/objects/pack/pack-A-*.pack)" &&
+		PACK_C="$(basename .git/objects/pack/pack-C-*.pack)" &&
+
+		git pack-objects test-dc --stdin-packs=damage-control \
+			--window=0 --depth=0 <<-EOF &&
+		$PACK_A
+		$PACK_C
+		EOF
+
+		(
+			git show-index <$(ls .git/objects/pack/pack-A-*.idx) &&
+			git show-index <$(ls .git/objects/pack/pack-C-*.idx)
+		) >expect.raw &&
+		git show-index <$(ls test-dc-*.idx) >actual.raw &&
+
+		cut -d" " -f2 <expect.raw | sort >expect &&
+		cut -d" " -f2 <actual.raw | sort >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success '--stdin-packs is incompatible with --filter' '
 	(
 		cd stdin-packs &&
