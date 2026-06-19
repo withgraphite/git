@@ -290,6 +290,7 @@ enum stdin_packs_mode {
 	STDIN_PACKS_MODE_NONE,
 	STDIN_PACKS_MODE_STANDARD,
 	STDIN_PACKS_MODE_FOLLOW,
+	STDIN_PACKS_MODE_DAMAGE_CONTROL,
 };
 
 /**
@@ -3917,7 +3918,8 @@ static int stdin_packs_include_check(struct commit *commit, void *data)
 }
 
 static void stdin_packs_add_pack_entries(struct strmap *packs,
-					 struct rev_info *revs)
+					 struct rev_info *revs,
+					 enum stdin_packs_mode mode)
 {
 	struct string_list keys = STRING_LIST_INIT_NODUP;
 	struct string_list_item *item;
@@ -3958,7 +3960,8 @@ static void stdin_packs_add_pack_entries(struct strmap *packs,
 			for_each_object_in_pack(info->p,
 						add_object_entry_from_pack,
 						revs,
-						ODB_FOR_EACH_OBJECT_PACK_ORDER);
+						mode == STDIN_PACKS_MODE_DAMAGE_CONTROL ?
+						0 : ODB_FOR_EACH_OBJECT_PACK_ORDER);
 	}
 
 	string_list_clear(&keys, 0);
@@ -4045,7 +4048,7 @@ static void stdin_packs_read_input(struct rev_info *revs,
 		info->p = p;
 	}
 
-	stdin_packs_add_pack_entries(&packs, revs);
+	stdin_packs_add_pack_entries(&packs, revs, mode);
 
 	strbuf_release(&buf);
 	strmap_clear(&packs, 1);
@@ -4097,12 +4100,14 @@ static void read_stdin_packs(enum stdin_packs_mode mode, int rev_list_unpacked)
 	if (rev_list_unpacked)
 		add_unreachable_loose_objects(&revs);
 
-	if (prepare_revision_walk(&revs))
-		die(_("revision walk setup failed"));
-	traverse_commit_list(&revs,
-			     show_commit_pack_hint,
-			     show_object_pack_hint,
-			     &mode);
+	if (mode != STDIN_PACKS_MODE_DAMAGE_CONTROL) {
+		if (prepare_revision_walk(&revs))
+			die(_("revision walk setup failed"));
+		traverse_commit_list(&revs,
+				     show_commit_pack_hint,
+				     show_object_pack_hint,
+				     &mode);
+	}
 
 	release_revisions(&revs);
 
@@ -4993,6 +4998,8 @@ static int parse_stdin_packs_mode(const struct option *opt, const char *arg,
 		*mode = STDIN_PACKS_MODE_STANDARD;
 	else if (!strcmp(arg, "follow"))
 		*mode = STDIN_PACKS_MODE_FOLLOW;
+	else if (!strcmp(arg, "damage-control"))
+		*mode = STDIN_PACKS_MODE_DAMAGE_CONTROL;
 	else
 		die(_("invalid value for '%s': '%s'"), opt->long_name, arg);
 
