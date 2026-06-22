@@ -24,7 +24,7 @@ static unsigned int update_flags;
 static unsigned int default_flags;
 static unsigned create_reflog_flag;
 static const char *msg;
-
+static int report_rejections_on_prepare;
 /*
  * Parse one whitespace- or NUL-terminated, possibly C-quoted argument
  * and append the result to arg.  Return a pointer to the terminator.
@@ -545,6 +545,15 @@ static void parse_cmd_start(struct ref_transaction *transaction UNUSED,
 	report_ok("start");
 }
 
+static void print_rejected_refs(const char *refname,
+				const struct object_id *old_oid,
+				const struct object_id *new_oid,
+				const char *old_target,
+				const char *new_target,
+				enum ref_transaction_error err,
+				const char *details,
+				void *cb_data);
+
 static void parse_cmd_prepare(struct ref_transaction *transaction,
 			      const char *next, const char *end UNUSED)
 {
@@ -553,6 +562,11 @@ static void parse_cmd_prepare(struct ref_transaction *transaction,
 		die("prepare: extra input: %s", next);
 	if (ref_transaction_prepare(transaction, &error))
 		die("prepare: %s", error.buf);
+
+	if (report_rejections_on_prepare)
+		ref_transaction_for_each_rejected_update(transaction,
+							 print_rejected_refs, NULL);
+
 	report_ok("prepare");
 }
 
@@ -599,8 +613,9 @@ static void parse_cmd_commit(struct ref_transaction *transaction,
 	if (ref_transaction_commit(transaction, &error))
 		die("commit: %s", error.buf);
 
-	ref_transaction_for_each_rejected_update(transaction,
-						 print_rejected_refs, NULL);
+	if (!report_rejections_on_prepare)
+		ref_transaction_for_each_rejected_update(transaction,
+							 print_rejected_refs, NULL);
 
 	report_ok("commit");
 	ref_transaction_free(transaction);
@@ -770,6 +785,9 @@ int cmd_update_ref(int argc,
 		OPT_BOOL( 0 , "create-reflog", &create_reflog, N_("create a reflog")),
 		OPT_BIT('0', "batch-updates", &flags, N_("batch reference updates"),
 			REF_TRANSACTION_ALLOW_FAILURE),
+		OPT_HIDDEN_BOOL(0, "batch-report-early",
+				&report_rejections_on_prepare,
+				N_("report batch-update rejections during prepare")),
 		OPT_END(),
 	};
 
@@ -789,12 +807,17 @@ int cmd_update_ref(int argc,
 	if (read_stdin) {
 		if (delete || argc > 0)
 			usage_with_options(git_update_ref_usage, options);
+		if (report_rejections_on_prepare &&
+		    !(flags & REF_TRANSACTION_ALLOW_FAILURE))
+			die("--batch-report-early requires --batch-updates");
 		if (end_null)
 			line_termination = '\0';
 		update_refs_stdin(flags);
 		return 0;
 	} else if (flags & REF_TRANSACTION_ALLOW_FAILURE) {
 		die("--batch-updates can only be used with --stdin");
+	} else if (report_rejections_on_prepare) {
+		die("--batch-report-early can only be used with --stdin");
 	}
 
 	if (end_null)
