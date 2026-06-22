@@ -32,6 +32,12 @@ struct command_options {
 	 * '--batch-updates' flag.
 	 */
 	bool allow_update_failures;
+	/*
+	 * Report batch-update rejections when a transaction is prepared, not only
+	 * when it is committed. This is hidden because existing callers may parse
+	 * the prepare response and not expect rejection lines before "prepare: ok".
+	 */
+	bool report_rejections_on_prepare;
 };
 
 /*
@@ -620,13 +626,18 @@ static void parse_cmd_start(struct ref_transaction *transaction UNUSED,
 
 static void parse_cmd_prepare(struct ref_transaction *transaction,
 			      const char *next, const char *end UNUSED,
-			      struct command_options *opts UNUSED)
+			      struct command_options *opts)
 {
 	struct strbuf error = STRBUF_INIT;
 	if (*next != line_termination)
 		die("prepare: extra input: %s", next);
 	if (ref_transaction_prepare(transaction, &error))
 		die("prepare: %s", error.buf);
+
+	if (opts->report_rejections_on_prepare)
+		ref_transaction_for_each_rejected_update(transaction,
+							 print_rejected_refs, NULL);
+
 	report_ok("prepare");
 }
 
@@ -644,7 +655,7 @@ static void parse_cmd_abort(struct ref_transaction *transaction,
 
 static void parse_cmd_commit(struct ref_transaction *transaction,
 			     const char *next, const char *end UNUSED,
-			     struct command_options *opts UNUSED)
+			     struct command_options *opts)
 {
 	struct strbuf error = STRBUF_INIT;
 	if (*next != line_termination)
@@ -652,8 +663,9 @@ static void parse_cmd_commit(struct ref_transaction *transaction,
 	if (ref_transaction_commit(transaction, &error))
 		die("commit: %s", error.buf);
 
-	ref_transaction_for_each_rejected_update(transaction,
-						 print_rejected_refs, NULL);
+	if (!opts->report_rejections_on_prepare)
+		ref_transaction_for_each_rejected_update(transaction,
+							 print_rejected_refs, NULL);
 
 	report_ok("commit");
 	ref_transaction_free(transaction);
@@ -692,7 +704,8 @@ static const struct parse_cmd {
 	{ "commit",        parse_cmd_commit,        0, UPDATE_REFS_CLOSED },
 };
 
-static void update_refs_stdin(unsigned int flags)
+static void update_refs_stdin(unsigned int flags,
+			      int report_rejections_on_prepare)
 {
 	struct strbuf input = STRBUF_INIT, err = STRBUF_INIT;
 	enum update_refs_state state = UPDATE_REFS_OPEN;
@@ -701,6 +714,7 @@ static void update_refs_stdin(unsigned int flags)
 
 	struct command_options opts = {
 		.allow_update_failures = flags & REF_TRANSACTION_ALLOW_FAILURE,
+		.report_rejections_on_prepare = report_rejections_on_prepare,
 	};
 
 	transaction = ref_store_transaction_begin(get_main_ref_store(the_repository),
@@ -815,7 +829,7 @@ int cmd_update_ref(int argc,
 	const char *refname, *oldval;
 	struct object_id oid, oldoid;
 	int delete = 0, no_deref = 0, read_stdin = 0, end_null = 0;
-	int create_reflog = 0;
+	int create_reflog = 0, report_rejections_on_prepare = 0;
 	unsigned int flags = 0;
 
 	struct option options[] = {
@@ -828,6 +842,9 @@ int cmd_update_ref(int argc,
 		OPT_BOOL( 0 , "create-reflog", &create_reflog, N_("create a reflog")),
 		OPT_BIT('0', "batch-updates", &flags, N_("batch reference updates"),
 			REF_TRANSACTION_ALLOW_FAILURE),
+		OPT_HIDDEN_BOOL(0, "batch-report-early",
+				&report_rejections_on_prepare,
+				N_("report batch-update rejections during prepare")),
 		OPT_END(),
 	};
 
@@ -847,12 +864,17 @@ int cmd_update_ref(int argc,
 	if (read_stdin) {
 		if (delete || argc > 0)
 			usage_with_options(git_update_ref_usage, options);
+		if (report_rejections_on_prepare &&
+		    !(flags & REF_TRANSACTION_ALLOW_FAILURE))
+			die("--batch-report-early requires --batch-updates");
 		if (end_null)
 			line_termination = '\0';
-		update_refs_stdin(flags);
+		update_refs_stdin(flags, report_rejections_on_prepare);
 		return 0;
 	} else if (flags & REF_TRANSACTION_ALLOW_FAILURE) {
 		die("--batch-updates can only be used with --stdin");
+	} else if (report_rejections_on_prepare) {
+		die("--batch-report-early can only be used with --stdin");
 	}
 
 	if (end_null)
