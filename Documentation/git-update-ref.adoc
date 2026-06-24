@@ -10,7 +10,7 @@ SYNOPSIS
 [synopsis]
 git update-ref [-m <reason>] [--no-deref] -d <ref> [<old-oid>]
 git update-ref [-m <reason>] [--no-deref] [--create-reflog] <ref> <new-oid> [<old-oid>]
-git update-ref [-m <reason>] [--no-deref] --stdin [-z] [--batch-updates]
+git update-ref [-m <reason>] [--no-deref] --stdin [-z] [--initial] [--batch-updates]
 
 DESCRIPTION
 -----------
@@ -58,6 +58,13 @@ performs all modifications together.  Specify commands of the form:
 
 With `--create-reflog`, update-ref will create a reflog for each ref
 even if one would not ordinarily be created.
+
+With `--initial`, update-ref assumes the ref store is empty and skips the
+checks that detect conflicts with existing references, writing the queued
+updates as an initial bulk load.  This is only valid when no references
+exist yet (for example, immediately after `git init`); using it against a
+populated ref store is unsupported.  It can only be used together with
+`--stdin`.
 
 With `--batch-updates`, update-ref executes the updates in a batch but allows
 individual updates to fail due to invalid or incorrect user input, applying only

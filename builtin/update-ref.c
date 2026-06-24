@@ -15,7 +15,7 @@
 static const char * const git_update_ref_usage[] = {
 	N_("git update-ref [<options>] -d <refname> [<old-oid>]"),
 	N_("git update-ref [<options>]    <refname> <new-oid> [<old-oid>]"),
-	N_("git update-ref [<options>] --stdin [-z] [--batch-updates]"),
+	N_("git update-ref [<options>] --stdin [-z] [--initial] [--batch-updates]"),
 	NULL
 };
 
@@ -842,6 +842,9 @@ int cmd_update_ref(int argc,
 		OPT_BOOL( 0 , "create-reflog", &create_reflog, N_("create a reflog")),
 		OPT_BIT('0', "batch-updates", &flags, N_("batch reference updates"),
 			REF_TRANSACTION_ALLOW_FAILURE),
+		OPT_BIT(0, "initial", &flags,
+			N_("assume the ref store is empty and skip checks"),
+			REF_TRANSACTION_FLAG_INITIAL),
 		OPT_HIDDEN_BOOL(0, "batch-report-early",
 				&report_rejections_on_prepare,
 				N_("report batch-update rejections during prepare")),
@@ -873,6 +876,8 @@ int cmd_update_ref(int argc,
 		return 0;
 	} else if (flags & REF_TRANSACTION_ALLOW_FAILURE) {
 		die("--batch-updates can only be used with --stdin");
+	} else if (flags & REF_TRANSACTION_FLAG_INITIAL) {
+		die("--initial can only be used with --stdin");
 	} else if (report_rejections_on_prepare) {
 		die("--batch-report-early can only be used with --stdin");
 	}
