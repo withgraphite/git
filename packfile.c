@@ -2176,6 +2176,26 @@ void unpin_pack(struct packed_git *p)
 	p->do_not_close--;
 }
 
+static int (*lookup_pin_fn)(struct packed_git *);
+
+void packfile_pin_packs_on_lookup(int (*pin)(struct packed_git *))
+{
+	lookup_pin_fn = pin;
+}
+
+void packfile_lookup_pin(struct packed_git *p)
+{
+	/*
+	 * Best effort only: a failed pin (e.g. the descriptor budget is
+	 * exhausted) must not turn an otherwise readable pack into a miss,
+	 * so the caller proceeds either way. The pack merely stays exposed
+	 * to a concurrent repack deleting it, as it would be without a
+	 * registered pin callback.
+	 */
+	if (lookup_pin_fn)
+		lookup_pin_fn(p);
+}
+
 static int fill_pack_entry(const struct object_id *oid,
 			   struct pack_entry *e,
 			   struct packed_git *p)
@@ -2199,6 +2219,7 @@ static int fill_pack_entry(const struct object_id *oid,
 	 */
 	if (!is_pack_valid(p))
 		return 0;
+	packfile_lookup_pin(p);
 	e->offset = offset;
 	e->p = p;
 	return 1;

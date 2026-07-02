@@ -244,6 +244,7 @@ static struct bitmap *reuse_packfile_bitmap;
 
 static struct packed_git **pinned_packs;
 static size_t pinned_packs_nr, pinned_packs_alloc;
+static intmax_t pin_failed_nr;
 
 static int use_bitmap_index_default = 1;
 static int use_bitmap_index = -1;
@@ -1355,11 +1356,14 @@ static const char no_split_warning[] = N_(
 
 /*
  * Keep a pack's descriptor open for the lifetime of this pack-objects run,
- * starting at the moment we commit to reading from it. Mid-run packs
- * discovered via reprepare are pinned when want_* / stdin-packs commit to
- * them. Returns -1 if the pack cannot be pinned; callers treat that as a
- * miss and look elsewhere (or die, for stdin-packs which name packs
- * explicitly).
+ * starting at the moment we commit to reading from it. Beyond the explicit
+ * calls in want_* / stdin-packs, this is registered via
+ * packfile_pin_packs_on_lookup() so that every object lookup (including
+ * the enumeration traversal's tree and commit reads, which happen before
+ * any entry is bound) pins the pack it resolved to. Mid-run packs
+ * discovered via reprepare are pinned the same way. Returns -1 if the
+ * pack cannot be pinned; callers treat that as a miss and look elsewhere
+ * (or die, for stdin-packs which name packs explicitly).
  */
 static int ensure_pack_pinned(struct packed_git *p)
 {
@@ -1368,8 +1372,10 @@ static int ensure_pack_pinned(struct packed_git *p)
 	for (i = 0; i < pinned_packs_nr; i++)
 		if (pinned_packs[i] == p)
 			return 0;
-	if (pin_pack(p))
+	if (pin_pack(p)) {
+		pin_failed_nr++;
 		return -1;
+	}
 	ALLOC_GROW(pinned_packs, pinned_packs_nr + 1, pinned_packs_alloc);
 	pinned_packs[pinned_packs_nr++] = p;
 	trace2_data_string("pack-objects", the_repository,
@@ -1393,6 +1399,9 @@ static void unpin_all_pinned_packs(void)
 	if (pinned_packs_nr)
 		trace2_data_intmax("pack-objects", the_repository,
 				   "read-pin/pinned", pinned_packs_nr);
+	if (pin_failed_nr)
+		trace2_data_intmax("pack-objects", the_repository,
+				   "read-pin/pin-failed", pin_failed_nr);
 	if (vanished)
 		trace2_data_intmax("pack-objects", the_repository,
 				   "read-pin/vanished", vanished);
@@ -5497,6 +5506,8 @@ int cmd_pack_objects(int argc,
 		}
 	}
 
+	packfile_pin_packs_on_lookup(ensure_pack_pinned);
+
 	trace2_region_enter("pack-objects", "enumerate-objects",
 			    the_repository);
 	prepare_packing_data(the_repository, &to_pack);
@@ -5562,6 +5573,7 @@ int cmd_pack_objects(int argc,
 	trace2_data_intmax("pack-objects", the_repository, "packs-reused", reuse_packfiles_used_nr);
 
 cleanup:
+	packfile_pin_packs_on_lookup(NULL);
 	unpin_all_pinned_packs();
 	clear_packing_data(&to_pack);
 	list_objects_filter_release(&filter_options);

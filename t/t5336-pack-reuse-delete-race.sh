@@ -46,6 +46,7 @@ run_pack_race () {
 	! grep "Too many open files" err &&
 	! grep "cannot be accessed" err &&
 	! grep "cannot be read" err &&
+	! grep "index unavailable" err &&
 	grep "\"key\":\"$trace_key\"" trace2.txt &&
 	git index-pack --strict -o result.idx result.pack
 }
@@ -132,6 +133,59 @@ test_expect_success PIPE 'delta compression survives source pack deletion' '
 		! grep -i warning: err &&
 		! grep "cannot be accessed" err &&
 		! grep "cannot be read" err &&
+		! grep "index unavailable" err &&
+		grep "\"key\":\"read-pin/vanished\"" trace2.txt &&
+		git index-pack --strict -o result.idx result.pack
+	)
+'
+
+# Race the enumeration window itself: lookups resolve objects through the
+# multi-pack-index (whose member packs have no .idx loaded), the packs are
+# deleted mid-enumeration, and the remaining lookups must degrade to quiet
+# misses that recover through the repacked objects -- no per-lookup
+# "packfile ... index unavailable" spam on stderr. The first half of the
+# object list pins pack A (read-pin/pinned-pack proves it), the repack
+# deletes both packs, and the second half is looked up afterwards.
+test_expect_success PIPE 'enumeration lookups survive pack deletion' '
+	git init lookup-race &&
+	(
+		cd lookup-race &&
+		setup_two_large_packs &&
+		git multi-pack-index write &&
+		git prune-packed &&
+		git config pack.allowPackReuse false &&
+
+		git rev-list --objects HEAD^ | cut -d" " -f1 >oids-a &&
+		git rev-list --objects HEAD --not HEAD^ | cut -d" " -f1 >oids-b &&
+		test_file_not_empty oids-b &&
+
+		fifo="$PWD/pack-race.fifo" &&
+		rm -f "$fifo" result.pack result.idx trace2.txt err &&
+		mkfifo "$fifo" &&
+		: >trace2.txt || return 1
+
+		GIT_TRACE2_EVENT="$PWD/trace2.txt" \
+			git -c core.packedGitLimit=1 pack-objects --stdout \
+				<"$fifo" >result.pack 2>err &
+		pid=$! &&
+
+		exec 9>"$fifo" &&
+		cat oids-a >&9 &&
+		tries=0 &&
+		until test $(grep -c "read-pin/pinned-pack" trace2.txt) -ge 1
+		do
+			tries=$((tries + 1)) &&
+			test $tries -le 60 &&
+			sleep 1 || return 1
+		done &&
+		git repack -adq &&
+		cat oids-b >&9 &&
+		exec 9>&- &&
+		wait $pid &&
+		! grep -i warning: err &&
+		! grep "cannot be accessed" err &&
+		! grep "cannot be read" err &&
+		! grep "index unavailable" err &&
 		grep "\"key\":\"read-pin/vanished\"" trace2.txt &&
 		git index-pack --strict -o result.idx result.pack
 	)
