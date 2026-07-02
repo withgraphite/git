@@ -356,6 +356,31 @@ static void index_commit_for_bitmap(struct commit *commit)
 	indexed_commits[indexed_commits_nr++] = commit;
 }
 
+/*
+ * Read an entry's canonical data, preferring the pack the entry was bound
+ * to at enumeration time: ensure_pack_pinned() keeps that pack readable
+ * even after a concurrent repack unlinks it. The generic object lookup is
+ * only a fallback (for entries with no bound pack, or if the bound copy
+ * itself fails to unpack): it re-resolves the object id from scratch and
+ * may pick a different, unpinned copy of the object -- or miss entirely
+ * once the racing repack's result has been re-read -- and then fail on an
+ * object that is still perfectly readable through the pinned descriptor.
+ */
+static void *read_entry_data(struct object_entry *entry,
+			     enum object_type *type, size_t *size)
+{
+	struct packed_git *p = IN_PACK(entry);
+
+	if (p) {
+		void *buf = unpack_entry(the_repository, p,
+					 entry->in_pack_offset, type, size);
+		if (buf)
+			return buf;
+	}
+	return odb_read_object(the_repository->objects, &entry->idx.oid,
+			       type, size);
+}
+
 static void *get_delta(struct object_entry *entry)
 {
 	unsigned long size, base_size, delta_size;
@@ -363,14 +388,11 @@ static void *get_delta(struct object_entry *entry)
 	enum object_type type;
 	size_t size_st = 0, base_size_st = 0;
 
-	buf = odb_read_object(the_repository->objects, &entry->idx.oid,
-			      &type, &size_st);
+	buf = read_entry_data(entry, &type, &size_st);
 	size = cast_size_t_to_ulong(size_st);
 	if (!buf)
 		die(_("unable to read %s"), oid_to_hex(&entry->idx.oid));
-	base_buf = odb_read_object(the_repository->objects,
-				   &DELTA(entry)->idx.oid, &type,
-				   &base_size_st);
+	base_buf = read_entry_data(DELTA(entry), &type, &base_size_st);
 	base_size = cast_size_t_to_ulong(base_size_st);
 	if (!base_buf)
 		die("unable to read %s",
@@ -539,9 +561,7 @@ static unsigned long write_no_reuse_object(struct hashfile *f, struct object_ent
 			size = st->size;
 		} else {
 			size_t size_st = 0;
-			buf = odb_read_object(the_repository->objects,
-					      &entry->idx.oid, &type,
-					      &size_st);
+			buf = read_entry_data(entry, &type, &size_st);
 			size = cast_size_t_to_ulong(size_st);
 			if (!buf)
 				die(_("unable to read %s"),
@@ -2844,9 +2864,22 @@ size_t oe_get_size_slow(struct packing_data *pack,
 
 	if (e->type_ != OBJ_OFS_DELTA && e->type_ != OBJ_REF_DELTA) {
 		size_t sz;
+
+		p = oe_in_pack(pack, e);
 		packing_data_lock(&to_pack);
-		if (odb_read_object_info(the_repository->objects,
-					 &e->idx.oid, &sz) < 0)
+		if (p) {
+			struct object_info oi = OBJECT_INFO_INIT;
+
+			oi.sizep = &sz;
+			/*
+			 * Prefer the bound (pinned) pack; see
+			 * read_entry_data().
+			 */
+			if (packed_object_info(p, e->in_pack_offset, &oi) < 0)
+				p = NULL;
+		}
+		if (!p && odb_read_object_info(the_repository->objects,
+					       &e->idx.oid, &sz) < 0)
 			die(_("unable to get size of %s"),
 			    oid_to_hex(&e->idx.oid));
 		packing_data_unlock(&to_pack);
@@ -2930,9 +2963,7 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	if (!trg->data) {
 		size_t sz_st = 0;
 		packing_data_lock(&to_pack);
-		trg->data = odb_read_object(the_repository->objects,
-					    &trg_entry->idx.oid, &type,
-					    &sz_st);
+		trg->data = read_entry_data(trg_entry, &type, &sz_st);
 		sz = cast_size_t_to_ulong(sz_st);
 		packing_data_unlock(&to_pack);
 		if (!trg->data)
@@ -2947,9 +2978,7 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	if (!src->data) {
 		size_t sz_st = 0;
 		packing_data_lock(&to_pack);
-		src->data = odb_read_object(the_repository->objects,
-					    &src_entry->idx.oid, &type,
-					    &sz_st);
+		src->data = read_entry_data(src_entry, &type, &sz_st);
 		sz = cast_size_t_to_ulong(sz_st);
 		packing_data_unlock(&to_pack);
 		if (!src->data) {

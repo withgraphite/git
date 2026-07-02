@@ -45,6 +45,7 @@ run_pack_race () {
 	! grep -i warning: err &&
 	! grep "Too many open files" err &&
 	! grep "cannot be accessed" err &&
+	! grep "cannot be read" err &&
 	grep "\"key\":\"$trace_key\"" trace2.txt &&
 	git index-pack --strict -o result.idx result.pack
 }
@@ -89,6 +90,50 @@ test_expect_success PIPE 'generic reads survive source pack deletion' '
 		git rev-list --objects --all | cut -d" " -f1 >objects &&
 
 		run_pack_race read-pin/vanished --stdin objects
+	)
+'
+
+# The write-phase races above stall pack-objects on its *output*, which only
+# exercises deletion after delta compression has finished. This one races the
+# earlier window that bit production: pins land during enumeration (the object
+# list is fed over a stdin FIFO and read-pin/pinned-pack events prove they
+# landed), the packs are deleted, and only then does stdin see EOF, so all of
+# delta compression and writing runs against deleted source packs.
+test_expect_success PIPE 'delta compression survives source pack deletion' '
+	git init compress-race &&
+	(
+		cd compress-race &&
+		setup_two_large_packs &&
+		git config pack.allowPackReuse false &&
+		git rev-list --objects --all | cut -d" " -f1 >objects &&
+
+		fifo="$PWD/pack-race.fifo" &&
+		rm -f "$fifo" result.pack result.idx trace2.txt err &&
+		mkfifo "$fifo" &&
+		: >trace2.txt || return 1
+
+		GIT_TRACE2_EVENT="$PWD/trace2.txt" \
+			git -c core.packedGitLimit=1 pack-objects --stdout \
+				<"$fifo" >result.pack 2>err &
+		pid=$! &&
+
+		exec 9>"$fifo" &&
+		cat objects >&9 &&
+		tries=0 &&
+		until test $(grep -c "read-pin/pinned-pack" trace2.txt) -ge 2
+		do
+			tries=$((tries + 1)) &&
+			test $tries -le 60 &&
+			sleep 1 || return 1
+		done &&
+		git repack -adq &&
+		exec 9>&- &&
+		wait $pid &&
+		! grep -i warning: err &&
+		! grep "cannot be accessed" err &&
+		! grep "cannot be read" err &&
+		grep "\"key\":\"read-pin/vanished\"" trace2.txt &&
+		git index-pack --strict -o result.idx result.pack
 	)
 '
 
