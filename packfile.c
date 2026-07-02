@@ -634,8 +634,18 @@ static int open_packed_git_1(struct packed_git *p)
 	ssize_t read_result;
 	const unsigned hashsz = p->repo->hash_algo->rawsz;
 
-	if (open_pack_index(p))
+	if (open_pack_index(p)) {
+		/*
+		 * A pack whose index never got loaded (e.g. one we only know
+		 * through a multi-pack-index) may race against a concurrent
+		 * repack deleting it. When the packfile itself is gone this
+		 * is an ordinary miss for our callers, not a broken index
+		 * worth complaining about on every lookup.
+		 */
+		if (access(p->pack_name, F_OK) < 0 && errno == ENOENT)
+			return -1;
 		return error("packfile %s index unavailable", p->pack_name);
+	}
 
 	prepare_pack_max_fds();
 
