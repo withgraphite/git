@@ -25,12 +25,20 @@ struct packed_git {
 	time_t mtime;
 	int pack_fd;
 	int index;              /* for builtin/pack-objects.c */
+	/*
+	 * Reference count of "pins" that must keep pack_fd open. While it is
+	 * non-zero, close_one_pack() and use_pack() must not close the
+	 * descriptor and packfile_store_close() must not close the pack. This
+	 * keeps a pack readable through its open descriptor even after a
+	 * concurrent repack unlinks it from disk. Managed via pin_pack() /
+	 * unpin_pack() (fast-import sets it directly for its output pack).
+	 */
+	unsigned int do_not_close;
 	unsigned pack_local:1,
 		 pack_keep:1,
 		 pack_keep_in_core:1,
 		 pack_keep_in_core_open:1,
 		 freshened:1,
-		 do_not_close:1,
 		 pack_promisor:1,
 		 multi_pack_index:1,
 		 is_cruft:1;
@@ -455,6 +463,9 @@ off_t nth_packed_object_offset(const struct packed_git *, uint32_t n);
 off_t find_pack_entry_one(const struct object_id *oid, struct packed_git *);
 
 int is_pack_valid(struct packed_git *);
+int pin_pack(struct packed_git *);
+void unpin_pack(struct packed_git *);
+
 void *unpack_entry(struct repository *r, struct packed_git *, off_t,
 		   enum object_type *, size_t *);
 unsigned long unpack_object_header_buffer(const unsigned char *buf, unsigned long len, enum object_type *type, size_t *sizep);

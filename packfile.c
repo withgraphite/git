@@ -16,6 +16,7 @@
 #include "object.h"
 #include "tag.h"
 #include "trace.h"
+#include "trace2.h"
 #include "tree-walk.h"
 #include "tree.h"
 #include "object-file.h"
@@ -543,7 +544,8 @@ static int close_one_pack(struct repository *r)
 	for (source = r->objects->sources; source; source = source->next) {
 		struct odb_source_files *files = odb_source_files_downcast(source);
 		for (e = files->packed->packs.head; e; e = e->next) {
-			if (e->pack->pack_fd == -1)
+			if (e->pack->pack_fd == -1 ||
+			    e->pack->do_not_close)
 				continue;
 			find_lru_pack(e->pack, &lru_p, &mru_w, &accept_windows_inuse);
 		}
@@ -606,6 +608,19 @@ const char *pack_basename(struct packed_git *p)
 	return ret;
 }
 
+static void prepare_pack_max_fds(void)
+{
+	if (!pack_max_fds) {
+		unsigned int max_fds = get_max_fd_limit();
+
+		/* Save 3 for stdin/stdout/stderr, 22 for work */
+		if (25 < max_fds)
+			pack_max_fds = max_fds - 25;
+		else
+			pack_max_fds = 1;
+	}
+}
+
 /*
  * Do not call this directly as this leaks p->pack_fd on error return;
  * call open_packed_git() instead.
@@ -622,18 +637,12 @@ static int open_packed_git_1(struct packed_git *p)
 	if (open_pack_index(p))
 		return error("packfile %s index unavailable", p->pack_name);
 
-	if (!pack_max_fds) {
-		unsigned int max_fds = get_max_fd_limit();
-
-		/* Save 3 for stdin/stdout/stderr, 22 for work */
-		if (25 < max_fds)
-			pack_max_fds = max_fds - 25;
-		else
-			pack_max_fds = 1;
-	}
+	prepare_pack_max_fds();
 
 	while (pack_max_fds <= pack_open_fds && close_one_pack(p->repo))
 		; /* nothing */
+	if (pack_max_fds <= pack_open_fds)
+		return -1;
 
 	p->pack_fd = git_open(p->pack_name);
 	if (p->pack_fd < 0 || fstat(p->pack_fd, &st))
@@ -713,8 +722,11 @@ unsigned char *use_pack(struct packed_git *p,
 	 * hash, and the in_window function above wouldn't match
 	 * don't allow an offset too close to the end of the file.
 	 */
-	if (!p->pack_size && p->pack_fd == -1 && open_packed_git(p))
+	if (!p->pack_size && p->pack_fd == -1 && open_packed_git(p)) {
+		trace2_data_string("packfile", p->repo, "cannot-access",
+				   pack_basename(p));
 		die("packfile %s cannot be accessed", p->pack_name);
+	}
 	if (offset > (p->pack_size - p->repo->hash_algo->rawsz))
 		die("offset beyond end of packfile (truncated pack?)");
 	if (offset < 0)
@@ -738,8 +750,12 @@ unsigned char *use_pack(struct packed_git *p,
 
 			window_align = settings->packed_git_window_size / 2;
 
-			if (p->pack_fd == -1 && open_packed_git(p))
+			if (p->pack_fd == -1 && open_packed_git(p)) {
+				trace2_data_string("packfile", p->repo,
+						   "cannot-access",
+						   pack_basename(p));
 				die("packfile %s cannot be accessed", p->pack_name);
+			}
 
 			CALLOC_ARRAY(win, 1);
 			win->offset = (offset / window_align) * window_align;
@@ -2116,6 +2132,38 @@ int is_pack_valid(struct packed_git *p)
 
 	/* Force the pack to open to prove its valid. */
 	return !open_packed_git(p);
+}
+
+/*
+ * Pin a pack's descriptor open so it stays readable until a matching
+ * unpin_pack(), even if a concurrent repack unlinks the pack from disk.
+ * Pins nest via a reference count, so overlapping callers (for example,
+ * lifetime pins in pack-objects and planning pins in the bitmap reuse writer)
+ * do not interfere.
+ *
+ * A pin requires a live open descriptor: a whole-file mmap alone is not
+ * enough under window pressure, because eviction would then leave the pack
+ * without a way to re-mmap the unlinked path. Returns -1 without pinning if
+ * the pack cannot be opened (already gone, or the descriptor budget is
+ * exhausted); callers should treat that as a miss and try elsewhere.
+ */
+int pin_pack(struct packed_git *p)
+{
+	p->do_not_close++;
+	if (p->pack_fd == -1 && open_packed_git(p)) {
+		p->do_not_close--;
+		return -1;
+	}
+
+	return 0;
+}
+
+void unpin_pack(struct packed_git *p)
+{
+	if (!p->do_not_close)
+		BUG("pack is not pinned: %s", p->pack_name);
+
+	p->do_not_close--;
 }
 
 static int fill_pack_entry(const struct object_id *oid,
