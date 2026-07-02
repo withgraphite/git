@@ -27,6 +27,7 @@
 #include "delta-islands.h"
 #include "reachable.h"
 #include "oid-array.h"
+#include "strbuf.h"
 #include "strvec.h"
 #include "strmap.h"
 #include "list.h"
@@ -240,6 +241,9 @@ static size_t reuse_packfiles_nr;
 static size_t reuse_packfiles_used_nr;
 static uint32_t reuse_packfile_objects;
 static struct bitmap *reuse_packfile_bitmap;
+
+static struct packed_git **pinned_packs;
+static size_t pinned_packs_nr, pinned_packs_alloc;
 
 static int use_bitmap_index_default = 1;
 static int use_bitmap_index = -1;
@@ -1329,6 +1333,79 @@ static const char no_split_warning[] = N_(
 "disabling bitmap writing, packs are split due to pack.packSizeLimit"
 );
 
+/*
+ * Keep a pack's descriptor open for the lifetime of this pack-objects run,
+ * starting at the moment we commit to reading from it. Mid-run packs
+ * discovered via reprepare are pinned when want_* / stdin-packs commit to
+ * them. Returns -1 if the pack cannot be pinned; callers treat that as a
+ * miss and look elsewhere (or die, for stdin-packs which name packs
+ * explicitly).
+ */
+static int ensure_pack_pinned(struct packed_git *p)
+{
+	size_t i;
+
+	for (i = 0; i < pinned_packs_nr; i++)
+		if (pinned_packs[i] == p)
+			return 0;
+	if (pin_pack(p))
+		return -1;
+	ALLOC_GROW(pinned_packs, pinned_packs_nr + 1, pinned_packs_alloc);
+	pinned_packs[pinned_packs_nr++] = p;
+	return 0;
+}
+
+static void unpin_all_pinned_packs(void)
+{
+	intmax_t vanished = 0;
+	size_t i;
+
+	for (i = 0; i < pinned_packs_nr; i++) {
+		struct packed_git *p = pinned_packs[i];
+
+		if (access(p->pack_name, F_OK) < 0 && errno == ENOENT)
+			vanished++;
+		unpin_pack(p);
+	}
+
+	if (vanished)
+		trace2_data_intmax("pack-objects", the_repository,
+				   "pack-pin/vanished", vanished);
+
+	FREE_AND_NULL(pinned_packs);
+	pinned_packs_nr = pinned_packs_alloc = 0;
+}
+
+/*
+ * Release the planning pin taken in pack-bitmap.c for fully-reused packs.
+ * Lifetime pins (via ensure_pack_pinned) for packs that also contribute
+ * enumerated objects remain until unpin_all_pinned_packs().
+ *
+ * Safe inside the write do-loop only because --stdout forbids
+ * --max-pack-size, so we never iterate again with these packs still listed.
+ */
+static void unpin_reuse_packfiles(void)
+{
+	size_t i;
+	intmax_t vanished = 0;
+
+	for (i = 0; i < reuse_packfiles_nr; i++) {
+		struct packed_git *p = reuse_packfiles[i].p;
+
+		if (access(p->pack_name, F_OK) < 0 && errno == ENOENT) {
+			trace2_data_string("pack-objects", the_repository,
+					   "pack-pin/reuse-vanished-pack",
+					   pack_basename(p));
+			vanished++;
+		}
+		unpin_pack(p);
+	}
+
+	if (vanished)
+		trace2_data_intmax("pack-objects", the_repository,
+				   "pack-pin/reuse-vanished", vanished);
+}
+
 static void write_pack_file(void)
 {
 	uint32_t i = 0, j;
@@ -1378,6 +1455,7 @@ static void write_pack_file(void)
 				if (reused_chunks_nr)
 					reuse_packfiles_used_nr++;
 			}
+			unpin_reuse_packfiles();
 			offset = hashfile_total(f);
 		}
 
@@ -1621,7 +1699,7 @@ static int want_found_object(const struct object_id *oid, int exclude,
 	if (incremental)
 		return 0;
 
-	if (!is_pack_valid(p))
+	if (ensure_pack_pinned(p))
 		return -1;
 
 	/*
@@ -1722,7 +1800,7 @@ static int want_object_in_pack_one(struct packed_git *p,
 
 	if (offset) {
 		if (!*found_pack) {
-			if (!is_pack_valid(p))
+			if (ensure_pack_pinned(p))
 				return -1;
 			*found_offset = offset;
 			*found_pack = p;
@@ -4034,7 +4112,7 @@ static void stdin_packs_read_input(struct rev_info *revs,
 			 * later on in e.g.  pack_mtime_cmp(), excluded
 			 * packs are handled below.
 			 */
-			if (!is_pack_valid(p))
+			if (ensure_pack_pinned(p))
 				die(_("packfile %s cannot be accessed"), p->pack_name);
 		}
 
@@ -5450,6 +5528,7 @@ int cmd_pack_objects(int argc,
 	trace2_data_intmax("pack-objects", the_repository, "packs-reused", reuse_packfiles_used_nr);
 
 cleanup:
+	unpin_all_pinned_packs();
 	clear_packing_data(&to_pack);
 	list_objects_filter_release(&filter_options);
 	string_list_clear(&keep_pack_list, 0);

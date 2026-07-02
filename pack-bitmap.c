@@ -2486,8 +2486,12 @@ void reuse_partial_packfile_from_bitmap(struct bitmap_index *bitmap_git,
 		for (i = 0; i < m->num_packs + m->num_packs_in_base; i++) {
 			struct bitmapped_pack pack;
 			if (nth_bitmapped_pack(bitmap_git->midx, &pack, i) < 0) {
+				size_t j;
+
 				warning(_("unable to load pack: '%s', disabling pack-reuse"),
 					bitmap_git->midx->pack_names[i]);
+				for (j = 0; j < packs_nr; j++)
+					unpin_pack(packs[j].p);
 				free(packs);
 				return;
 			}
@@ -2495,7 +2499,7 @@ void reuse_partial_packfile_from_bitmap(struct bitmap_index *bitmap_git,
 			if (!pack.bitmap_nr)
 				continue;
 
-			if (is_pack_valid(pack.p)) {
+			if (!pin_pack(pack.p)) {
 				ALLOC_GROW(packs, packs_nr + 1, packs_alloc);
 				memcpy(&packs[packs_nr++], &pack, sizeof(pack));
 			}
@@ -2536,7 +2540,7 @@ void reuse_partial_packfile_from_bitmap(struct bitmap_index *bitmap_git,
 			pack_int_id = -1;
 		}
 
-		if (is_pack_valid(pack)) {
+		if (!pin_pack(pack)) {
 			ALLOC_GROW(packs, packs_nr + 1, packs_alloc);
 			packs[packs_nr].p = pack;
 			packs[packs_nr].pack_int_id = pack_int_id;
@@ -2561,6 +2565,8 @@ void reuse_partial_packfile_from_bitmap(struct bitmap_index *bitmap_git,
 		reuse_partial_packfile_from_bitmap_1(bitmap_git, &packs[i], reuse);
 
 	if (bitmap_is_empty(reuse)) {
+		for (i = 0; i < packs_nr; i++)
+			unpin_pack(packs[i].p);
 		free(packs);
 		bitmap_free(reuse);
 		return;
