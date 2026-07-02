@@ -72,7 +72,7 @@ test_expect_success PIPE 'bitmap pack-reuse survives source pack deletion' '
 		setup_two_large_packs &&
 		git multi-pack-index write --bitmap &&
 
-		run_pack_race pack-pin/reuse-vanished \
+		run_pack_race read-pin/reuse-vanished \
 			--revs --all --delta-base-offset
 	)
 '
@@ -88,7 +88,7 @@ test_expect_success PIPE 'generic reads survive source pack deletion' '
 		git config pack.allowPackReuse false &&
 		git rev-list --objects --all | cut -d" " -f1 >objects &&
 
-		run_pack_race pack-pin/vanished --stdin objects
+		run_pack_race read-pin/vanished --stdin objects
 	)
 '
 

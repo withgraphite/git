@@ -1352,6 +1352,8 @@ static int ensure_pack_pinned(struct packed_git *p)
 		return -1;
 	ALLOC_GROW(pinned_packs, pinned_packs_nr + 1, pinned_packs_alloc);
 	pinned_packs[pinned_packs_nr++] = p;
+	trace2_data_string("pack-objects", the_repository,
+			   "read-pin/pinned-pack", pack_basename(p));
 	return 0;
 }
 
@@ -1368,9 +1370,12 @@ static void unpin_all_pinned_packs(void)
 		unpin_pack(p);
 	}
 
+	if (pinned_packs_nr)
+		trace2_data_intmax("pack-objects", the_repository,
+				   "read-pin/pinned", pinned_packs_nr);
 	if (vanished)
 		trace2_data_intmax("pack-objects", the_repository,
-				   "pack-pin/vanished", vanished);
+				   "read-pin/vanished", vanished);
 
 	FREE_AND_NULL(pinned_packs);
 	pinned_packs_nr = pinned_packs_alloc = 0;
@@ -1394,7 +1399,7 @@ static void unpin_reuse_packfiles(void)
 
 		if (access(p->pack_name, F_OK) < 0 && errno == ENOENT) {
 			trace2_data_string("pack-objects", the_repository,
-					   "pack-pin/reuse-vanished-pack",
+					   "read-pin/reuse-vanished-pack",
 					   pack_basename(p));
 			vanished++;
 		}
@@ -1403,7 +1408,7 @@ static void unpin_reuse_packfiles(void)
 
 	if (vanished)
 		trace2_data_intmax("pack-objects", the_repository,
-				   "pack-pin/reuse-vanished", vanished);
+				   "read-pin/reuse-vanished", vanished);
 }
 
 static void write_pack_file(void)
