@@ -300,9 +300,14 @@ test_expect_success 'compaction of older layers' '
 		# small layers at the bottom of the chain as a
 		# separate step in the compaction plan.
 		test_commit another &&
-		git repack --geometric=2 -d --write-midx=incremental \
+		GIT_TRACE2_EVENT="$(pwd)/repack.trace" \
+			git repack --geometric=2 -d --write-midx=incremental \
 			--write-bitmap-index &&
 
+		test_grep -E "\"argv\":\\[\"git\",\"multi-pack-index\",\"write\".*\"--refs-snapshot=[^\"]+\"" \
+			repack.trace &&
+		test_grep -E "\"argv\":\\[\"git\",\"multi-pack-index\",\"compact\".*\"--refs-snapshot=[^\"]+\"" \
+			repack.trace &&
 		test_line_count = 2 "$midx_chain" &&
 		git multi-pack-index verify
 	)

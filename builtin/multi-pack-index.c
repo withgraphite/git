@@ -23,6 +23,7 @@
 #define BUILTIN_MIDX_COMPACT_USAGE \
 	N_("git multi-pack-index [<options>] compact [--[no-]incremental]\n" \
 	   "  [--[no-]bitmap] [--base=<checksum>] [--[no-]write-chain-file]\n" \
+	   "  [--refs-snapshot=<path>]\n" \
 	   "  [--max-chain-depth=<n> [--split-factor=<n>]] [<from> <to>]")
 
 #define BUILTIN_MIDX_VERIFY_USAGE \
@@ -268,6 +269,8 @@ static int cmd_multi_pack_index_compact(int argc, const char **argv,
 		OPT_NEGBIT(0, "write-chain-file", &opts.flags,
 			N_("write the multi-pack-index chain file"),
 			MIDX_WRITE_NO_CHAIN),
+		OPT_FILENAME(0, "refs-snapshot", &opts.refs_snapshot,
+			     N_("refs snapshot for selecting bitmap commits")),
 		OPT_CALLBACK(0, "max-chain-depth", &opts.max_chain_depth,
 			     N_("n"),
 			     N_("automatically compact when the chain has more than this many layers"),
@@ -337,11 +340,15 @@ static int cmd_multi_pack_index_compact(int argc, const char **argv,
 
 	FREE_AND_NULL(options);
 
-	if (opts.max_chain_depth)
-		return compact_midx_chain_auto(source,
-					       (uint32_t)opts.max_chain_depth,
-					       (uint32_t)opts.split_factor,
-					       opts.flags);
+	if (opts.max_chain_depth) {
+		ret = compact_midx_chain_auto(source,
+					      (uint32_t)opts.max_chain_depth,
+					      (uint32_t)opts.split_factor,
+					      opts.refs_snapshot,
+					      opts.flags);
+		free(opts.refs_snapshot);
+		return ret;
+	}
 
 	m = get_multi_pack_index(source);
 
@@ -367,8 +374,10 @@ static int cmd_multi_pack_index_compact(int argc, const char **argv,
 	}
 
 	ret = write_midx_file_compact(source, from_midx, to_midx,
+				      opts.refs_snapshot,
 				      opts.incremental_base, opts.flags);
 
+	free(opts.refs_snapshot);
 	return ret;
 }
 

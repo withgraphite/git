@@ -15,6 +15,7 @@ SYNOPSIS
 			 [--base=<checksum>]
 'git multi-pack-index' [<options>] compact [--[no-]incremental]
 		         [--[no-]bitmap] [--base=<checksum>] [--[no-]write-chain-file]
+		         [--refs-snapshot=<path>]
 			 [--max-chain-depth=<n> [--split-factor=<n>]] [<from> <to>]
 'git multi-pack-index' [<options>] verify
 'git multi-pack-index' [<options>] expire
@@ -113,6 +114,11 @@ compact::
 
 	--[no-]bitmap::
 		Control whether or not a multi-pack bitmap is written.
+
+	--refs-snapshot=<path>::
+		With `--bitmap`, use the given refs snapshot when
+		selecting commits for the compacted layer. The format is
+		the same as for the `write` subcommand.
 
 	--[no-]write-chain-file::
 		When used with `--incremental`, write a new compacted

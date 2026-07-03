@@ -627,6 +627,7 @@ static int pseudo_merge_bitmap_parents;
 
 static int fill_bitmap_commit_calls_nr;
 static int fill_bitmap_commit_found_ancestor_nr;
+static int bitmap_reuse_misses_nr;
 
 static int fill_bitmap_commit(struct bitmap_writer *writer,
 			      struct bb_commit *ent,
@@ -634,7 +635,8 @@ static int fill_bitmap_commit(struct bitmap_writer *writer,
 			      struct prio_queue *queue,
 			      struct prio_queue *tree_queue,
 			      struct bitmap_index *old_bitmap,
-			      const uint32_t *mapping)
+			      const uint32_t *mapping,
+			      int old_bitmap_positions_stable)
 {
 	int found;
 	int from_pseudo_merge = commit->object.flags & BITMAP_PSEUDO_MERGE;
@@ -654,23 +656,32 @@ static int fill_bitmap_commit(struct bitmap_writer *writer,
 		struct commit_list *p;
 		struct commit *c = prio_queue_get(queue);
 
-		if (old_bitmap && mapping) {
+		if (old_bitmap && (mapping || old_bitmap_positions_stable)) {
 			struct ewah_bitmap *old;
-			struct bitmap *remapped = bitmap_new();
 
 			old = bitmap_for_commit(old_bitmap, c);
+			if (old && old_bitmap_positions_stable) {
+				bitmap_or_ewah(ent->bitmap, old);
+				reused_bitmaps_nr++;
+				continue;
+			}
 			/*
 			 * If this commit has an old bitmap, then translate that
 			 * bitmap and add its bits to this one. No need to walk
 			 * parents or the tree for this commit.
 			 */
-			if (old && !rebuild_bitmap(mapping, old, remapped)) {
-				bitmap_or(ent->bitmap, remapped);
+			if (old) {
+				struct bitmap *remapped = bitmap_new();
+
+				if (!rebuild_bitmap(mapping, old, remapped)) {
+					bitmap_or(ent->bitmap, remapped);
+					bitmap_free(remapped);
+					reused_bitmaps_nr++;
+					continue;
+				}
 				bitmap_free(remapped);
-				reused_bitmaps_nr++;
-				continue;
 			}
-			bitmap_free(remapped);
+			bitmap_reuse_misses_nr++;
 		}
 
 		/*
@@ -764,13 +775,14 @@ static int fill_bitmap_commit(struct bitmap_writer *writer,
 
 static int reuse_pseudo_merge_bitmap(struct bitmap_index *old_bitmap,
 				     const uint32_t *mapping,
+				     int old_bitmap_positions_stable,
 				     struct commit *merge,
 				     struct ewah_bitmap **out)
 {
 	struct ewah_bitmap *old;
 	struct bitmap *remapped;
 
-	if (!old_bitmap || !mapping)
+	if (!old_bitmap || (!mapping && !old_bitmap_positions_stable))
 		return 0;
 
 	old = pseudo_merge_bitmap_for_commit(old_bitmap, merge);
@@ -778,7 +790,9 @@ static int reuse_pseudo_merge_bitmap(struct bitmap_index *old_bitmap,
 		return 0;
 
 	remapped = bitmap_new();
-	if (rebuild_bitmap(mapping, old, remapped) < 0) {
+	if (old_bitmap_positions_stable)
+		bitmap_or_ewah(remapped, old);
+	else if (rebuild_bitmap(mapping, old, remapped) < 0) {
 		bitmap_free(remapped);
 		return 0;
 	}
@@ -792,6 +806,7 @@ static int reuse_pseudo_merge_bitmap(struct bitmap_index *old_bitmap,
 static int build_pseudo_merge_bitmap(struct bitmap_writer *writer,
 				     struct bitmap_index *old_bitmap,
 				     const uint32_t *mapping,
+				     int old_bitmap_positions_stable,
 				     struct commit *merge,
 				     struct ewah_bitmap **out)
 {
@@ -806,13 +821,15 @@ static int build_pseudo_merge_bitmap(struct bitmap_writer *writer,
 	pseudo_merge_bitmap_nr++;
 	pseudo_merge_bitmap_parents += parents;
 
-	if (reuse_pseudo_merge_bitmap(old_bitmap, mapping, merge, out)) {
+	if (reuse_pseudo_merge_bitmap(old_bitmap, mapping,
+				      old_bitmap_positions_stable, merge, out)) {
 		ret = 0;
 		goto done;
 	}
 
 	ret = fill_bitmap_commit(writer, &ent, merge, &queue, &tree_queue,
-				 old_bitmap, mapping);
+				 old_bitmap, mapping,
+				 old_bitmap_positions_stable);
 
 	if (!ret)
 		*out = bitmap_to_ewah(ent.bitmap);
@@ -828,6 +845,7 @@ done:
 static int build_pseudo_merge_bitmaps(struct bitmap_writer *writer,
 				      struct bitmap_index *old_bitmap,
 				      const uint32_t *mapping,
+				      int old_bitmap_positions_stable,
 				      int *nr_stored)
 {
 	size_t i = bitmap_writer_nr_selected_commits(writer);
@@ -866,6 +884,7 @@ static int build_pseudo_merge_bitmaps(struct bitmap_writer *writer,
 		bitmap_free(parents);
 
 		if (build_pseudo_merge_bitmap(writer, old_bitmap, mapping,
+					      old_bitmap_positions_stable,
 					      merge->commit, &objects) < 0) {
 			ret = -1;
 			goto done;
@@ -921,6 +940,7 @@ int bitmap_writer_build(struct bitmap_writer *writer)
 	struct prio_queue tree_queue = { NULL };
 	struct bitmap_index *old_bitmap;
 	uint32_t *mapping = NULL;
+	int old_bitmap_positions_stable = 0;
 	int closed = 1; /* until proven otherwise */
 
 	if (writer->show_progress)
@@ -934,11 +954,18 @@ int bitmap_writer_build(struct bitmap_writer *writer)
 	trace2_region_enter("pack-bitmap-write", "building_bitmaps_total",
 			    writer->repo);
 
-	old_bitmap = prepare_bitmap_git(writer->to_pack->repo);
-	if (old_bitmap)
+	if (writer->midx) {
+		/*
+		 * Incremental MIDX layers append to their base's pseudo-pack
+		 * order, so every base bitmap position remains unchanged.
+		 */
+		old_bitmap = prepare_bitmap_git_for_midx(writer->midx);
+		old_bitmap_positions_stable = !!old_bitmap;
+	} else {
+		old_bitmap = prepare_bitmap_git(writer->to_pack->repo);
+	}
+	if (old_bitmap && !old_bitmap_positions_stable)
 		mapping = create_bitmap_mapping(old_bitmap, writer->to_pack);
-	else
-		mapping = NULL;
 
 	bitmap_builder_init(&bb, writer, old_bitmap);
 	for (i = bb.commits.nr; i > 0; i--) {
@@ -948,7 +975,8 @@ int bitmap_writer_build(struct bitmap_writer *writer)
 		int reused = 0;
 
 		if (fill_bitmap_commit(writer, ent, commit, &queue, &tree_queue,
-				       old_bitmap, mapping) < 0) {
+				       old_bitmap, mapping,
+				       old_bitmap_positions_stable) < 0) {
 			closed = 0;
 			break;
 		}
@@ -978,6 +1006,7 @@ int bitmap_writer_build(struct bitmap_writer *writer)
 	}
 	if (closed &&
 	    build_pseudo_merge_bitmaps(writer, old_bitmap, mapping,
+				       old_bitmap_positions_stable,
 				       &nr_stored) < 0)
 		closed = 0;
 	clear_prio_queue(&queue);
@@ -990,6 +1019,12 @@ int bitmap_writer_build(struct bitmap_writer *writer)
 			    writer->repo);
 	trace2_data_intmax("pack-bitmap-write", writer->repo,
 			   "building_bitmaps_reused", reused_bitmaps_nr);
+	trace2_data_intmax("pack-bitmap-write", writer->repo,
+			   "building_bitmaps_reuse_misses",
+			   bitmap_reuse_misses_nr);
+	trace2_data_intmax("pack-bitmap-write", writer->repo,
+			   "base_bitmap_positions_stable",
+			   old_bitmap_positions_stable);
 	trace2_data_intmax("pack-bitmap-write", writer->repo,
 			   "fill_bitmap_commit_calls_nr",
 			   fill_bitmap_commit_calls_nr);

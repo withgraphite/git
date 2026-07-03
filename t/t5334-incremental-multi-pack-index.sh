@@ -70,7 +70,12 @@ test_expect_success 'read bitmap from first MIDX layer' '
 '
 
 test_expect_success 'write another MIDX layer' '
-	write_midx_layer
+	test_env GIT_TRACE2_EVENT="$(pwd)/bitmap-reuse.trace" \
+		write_midx_layer &&
+	test_trace2_data pack-bitmap-write base_bitmap_positions_stable 1 \
+		<bitmap-reuse.trace &&
+	test_grep -E "\"key\":\"building_bitmaps_reused\",\"value\":\"[1-9][0-9]*\"" \
+		bitmap-reuse.trace
 '
 
 test_expect_success 'midx verify with multiple layers' '
@@ -86,6 +91,50 @@ test_expect_success 'read bitmap from second MIDX layer' '
 
 test_expect_success 'read earlier bitmap from second MIDX layer' '
 	git rev-list --test-bitmap 1.2
+'
+
+test_expect_success 'incremental bitmap walk stops at base MIDX commits' '
+	git init base-boundary &&
+	(
+		cd base-boundary &&
+		test_commit base &&
+		git config set maintenance.auto false &&
+		git repack -ad &&
+		git multi-pack-index write --bitmap &&
+
+		test_commit tip &&
+		git repack -d &&
+		GIT_TRACE2_EVENT="$(pwd)/trace" \
+			git multi-pack-index write --bitmap --incremental &&
+
+		test_trace2_data midx bitmap_commits_visited 2 <trace &&
+		test_trace2_data midx bitmap_base_boundary_hits 1 <trace &&
+		test_trace2_data midx bitmap_commits_retained 1 <trace &&
+		git multi-pack-index verify &&
+		git rev-list --test-bitmap tip
+	)
+'
+
+test_expect_success 'incremental bitmap works with unbitmapped base' '
+	git init unbitmapped-base &&
+	(
+		cd unbitmapped-base &&
+		test_commit base &&
+		git config set maintenance.auto false &&
+		git repack -ad &&
+		git multi-pack-index write --bitmap &&
+		base_hash="$(midx_checksum .git/objects)" &&
+		rm "$packdir/multi-pack-index-$base_hash.bitmap" &&
+
+		test_commit tip &&
+		git repack -d &&
+		GIT_TRACE2_EVENT="$(pwd)/trace" \
+			git multi-pack-index write --bitmap --incremental &&
+
+		test_trace2_data pack-bitmap-write \
+			base_bitmap_positions_stable 0 <trace &&
+		git multi-pack-index verify
+	)
 '
 
 test_expect_success 'show object from first pack' '

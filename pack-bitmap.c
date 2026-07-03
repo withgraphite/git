@@ -761,6 +761,19 @@ struct bitmap_index *prepare_midx_bitmap_git(struct multi_pack_index *midx)
 	return NULL;
 }
 
+struct bitmap_index *prepare_bitmap_git_for_midx(struct multi_pack_index *midx)
+{
+	struct bitmap_index *bitmap_git = xcalloc(1, sizeof(*bitmap_git));
+	struct repository *r = midx->source->odb->repo;
+
+	if (!open_midx_bitmap_1(bitmap_git, midx) &&
+	    !load_bitmap(r, bitmap_git, 0))
+		return bitmap_git;
+
+	free_bitmap_index(bitmap_git);
+	return NULL;
+}
+
 int bitmap_index_contains_pack(struct bitmap_index *bitmap, struct packed_git *pack)
 {
 	for (; bitmap; bitmap = bitmap->base) {
@@ -3125,8 +3138,10 @@ uint32_t *create_bitmap_mapping(struct bitmap_index *bitmap_git,
 				struct packing_data *mapping)
 {
 	struct repository *r = bitmap_repo(bitmap_git);
-	uint32_t i, num_objects;
+	uint32_t i, mapped_objects = 0, num_objects;
 	uint32_t *reposition;
+
+	trace2_region_enter("pack-bitmap-write", "create_bitmap_mapping", r);
 
 	if (!bitmap_is_midx(bitmap_git))
 		load_reverse_index(r, bitmap_git);
@@ -3151,10 +3166,17 @@ uint32_t *create_bitmap_mapping(struct bitmap_index *bitmap_git,
 
 		if (oe) {
 			reposition[i] = oe_in_pack_pos(mapping, oe) + 1;
+			mapped_objects++;
 			if (!oe->hash)
 				oe->hash = bitmap_name_hash(bitmap_git, index_pos);
 		}
 	}
+
+	trace2_data_intmax("pack-bitmap-write", r,
+			   "bitmap_mapping_objects", num_objects);
+	trace2_data_intmax("pack-bitmap-write", r,
+			   "bitmap_mapping_objects_mapped", mapped_objects);
+	trace2_region_leave("pack-bitmap-write", "create_bitmap_mapping", r);
 
 	return reposition;
 }

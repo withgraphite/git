@@ -68,6 +68,7 @@ struct bitmapped_pack {
 
 struct bitmap_index *prepare_bitmap_git(struct repository *r);
 struct bitmap_index *prepare_midx_bitmap_git(struct multi_pack_index *midx);
+struct bitmap_index *prepare_bitmap_git_for_midx(struct multi_pack_index *midx);
 
 /*
  * Given a bitmap index, determine whether it contains the pack either directly

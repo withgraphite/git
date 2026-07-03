@@ -294,6 +294,10 @@ static void repack_prepare_midx_command(struct child_process *cmd,
 
 	if (opts->write_bitmaps)
 		strvec_push(&cmd->args, "--bitmap");
+
+	if (opts->refs_snapshot)
+		strvec_pushf(&cmd->args, "--refs-snapshot=%s",
+			     opts->refs_snapshot);
 }
 
 static int repack_fill_midx_stdin_packs(struct child_process *cmd,
@@ -372,10 +376,6 @@ static int write_midx_included_packs(struct repack_write_midx_opts *opts)
 		 */
 		;
 	}
-
-	if (opts->refs_snapshot)
-		strvec_pushf(&cmd.args, "--refs-snapshot=%s",
-			     opts->refs_snapshot);
 
 	ret = repack_fill_midx_stdin_packs(&cmd, &include, NULL);
 done:

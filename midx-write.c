@@ -395,7 +395,10 @@ static void compute_sorted_entries(struct write_midx_context *ctx,
 {
 	uint32_t cur_fanout, cur_pack, cur_object;
 	size_t alloc_objects, total_objects = 0;
+	uint64_t base_oid_probes = 0, duplicate_oids = 0;
 	struct midx_fanout fanout = { 0 };
+
+	trace2_region_enter("midx", "compute_sorted_entries", ctx->repo);
 
 	if (ctx->compact)
 		ASSERT(!start_pack);
@@ -430,12 +433,16 @@ static void compute_sorted_entries(struct write_midx_context *ctx,
 		 */
 		for (cur_object = 0; cur_object < fanout.nr; cur_object++) {
 			if (cur_object && oideq(&fanout.entries[cur_object - 1].oid,
-						&fanout.entries[cur_object].oid))
+						&fanout.entries[cur_object].oid)) {
+				duplicate_oids++;
 				continue;
-			if (ctx->incremental && ctx->base_midx &&
-			    midx_has_oid(ctx->base_midx,
-					 &fanout.entries[cur_object].oid))
-				continue;
+			}
+			if (ctx->incremental && ctx->base_midx) {
+				base_oid_probes++;
+				if (midx_has_oid(ctx->base_midx,
+						 &fanout.entries[cur_object].oid))
+					continue;
+			}
 
 			ALLOC_GROW(ctx->entries, st_add(ctx->entries_nr, 1),
 				   alloc_objects);
@@ -447,6 +454,11 @@ static void compute_sorted_entries(struct write_midx_context *ctx,
 	}
 
 	free(fanout.entries);
+	trace2_data_intmax("midx", ctx->repo, "sorted_entries_base_oid_probes",
+			   base_oid_probes);
+	trace2_data_intmax("midx", ctx->repo, "sorted_entries_duplicate_oids",
+			   duplicate_oids);
+	trace2_region_leave("midx", "compute_sorted_entries", ctx->repo);
 }
 
 static int write_midx_pack_names(struct hashfile *f, void *data)
@@ -779,6 +791,9 @@ static int add_ref_to_pending(const struct reference *ref, void *cb_data)
 struct bitmap_commit_cb {
 	struct commit_stack *commits;
 	struct write_midx_context *ctx;
+	uint64_t base_boundary_hits;
+	uint64_t commits_retained;
+	uint64_t commits_visited;
 };
 
 static const struct object_id *bitmap_oid_access(size_t index,
@@ -798,6 +813,21 @@ static void bitmap_show_commit(struct commit *commit, void *_data)
 		return;
 
 	commit_stack_push(data->commits, commit);
+	data->commits_retained++;
+}
+
+static int bitmap_include_commit(struct commit *commit, void *_data)
+{
+	struct bitmap_commit_cb *data = _data;
+
+	data->commits_visited++;
+	if (data->ctx->incremental && data->ctx->base_midx &&
+	    midx_has_oid(data->ctx->base_midx, &commit->object.oid)) {
+		data->base_boundary_hits++;
+		return 0;
+	}
+
+	return 1;
 }
 
 static int read_refs_snapshot(const char *refs_snapshot,
@@ -853,6 +883,9 @@ static void find_commits_for_midx_bitmap(struct commit_stack *commits,
 				  add_ref_to_pending, &revs);
 	}
 
+	revs.include_check = bitmap_include_commit;
+	revs.include_check_data = &cb;
+
 	/*
 	 * Skipping promisor objects here is intentional, since it only excludes
 	 * them from the list of reachable commits that we want to select from
@@ -875,6 +908,12 @@ static void find_commits_for_midx_bitmap(struct commit_stack *commits,
 
 	release_revisions(&revs);
 
+	trace2_data_intmax("midx", ctx->repo, "bitmap_commits_visited",
+			   cb.commits_visited);
+	trace2_data_intmax("midx", ctx->repo, "bitmap_base_boundary_hits",
+			   cb.base_boundary_hits);
+	trace2_data_intmax("midx", ctx->repo, "bitmap_commits_retained",
+			   cb.commits_retained);
 	trace2_region_leave("midx", "find_commits_for_midx_bitmap", ctx->repo);
 }
 
@@ -1884,6 +1923,7 @@ int write_midx_file_only(struct odb_source *source,
 int write_midx_file_compact(struct odb_source *source,
 			    struct multi_pack_index *from,
 			    struct multi_pack_index *to,
+			    const char *refs_snapshot,
 			    const char *incremental_base,
 			    unsigned flags)
 {
@@ -1891,6 +1931,7 @@ int write_midx_file_compact(struct odb_source *source,
 		.source = source,
 		.compact_from = from,
 		.compact_to = to,
+		.refs_snapshot = refs_snapshot,
 		.incremental_base = incremental_base,
 		.flags = flags | MIDX_WRITE_COMPACT,
 	};
@@ -1901,6 +1942,7 @@ int write_midx_file_compact(struct odb_source *source,
 int compact_midx_chain_auto(struct odb_source *source,
 			    uint32_t max_chain_depth,
 			    uint32_t split_factor,
+			    const char *refs_snapshot,
 			    unsigned flags)
 {
 	struct repository *r = source->odb->repo;
@@ -1967,7 +2009,8 @@ int compact_midx_chain_auto(struct odb_source *source,
 	 * suffix of the chain, so the compacted layer naturally uses from's
 	 * immediate base as its base. Custom --base is for explicit callers.
 	 */
-	ret = write_midx_file_compact(source, from_midx, to_midx, NULL, flags);
+	ret = write_midx_file_compact(source, from_midx, to_midx,
+				      refs_snapshot, NULL, flags);
 	trace2_region_leave("midx", "compact_midx_chain_auto", r);
 	return ret;
 }
