@@ -195,4 +195,31 @@ test_expect_success 'non-incremental write with existing incremental chain' '
 	)
 '
 
+test_expect_success 'non-incremental bitmap write to alternate object dir with mixed chain' '
+	git init alternate-object-dir-with-existing &&
+	test_when_finished "rm -fr alternate-object-dir-with-existing" &&
+
+	(
+		cd alternate-object-dir-with-existing &&
+		git config set maintenance.auto false &&
+
+		test_commit base &&
+		git repack -ad &&
+		git multi-pack-index write --bitmap &&
+		base_hash="$(midx_checksum .git/objects)" &&
+		rm "$packdir/multi-pack-index-$base_hash.bitmap" &&
+
+		test_commit tip &&
+		git repack -d &&
+		git multi-pack-index write --incremental --bitmap &&
+
+		mkdir -p stage-objects/pack &&
+		ln "$packdir"/*.pack "$packdir"/*.idx stage-objects/pack &&
+		git multi-pack-index write --bitmap \
+			--object-dir="$(pwd)/stage-objects" &&
+		git multi-pack-index verify \
+			--object-dir="$(pwd)/stage-objects"
+	)
+'
+
 test_done
