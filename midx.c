@@ -616,7 +616,8 @@ int fill_midx_entry(struct multi_pack_index *m,
 	*/
 	if (!is_pack_valid(p))
 		return 0;
-	packfile_lookup_pin(p);
+	if (packfile_lookup_pin(p))
+		return 0;
 
 	if (oidset_size(&p->bad_objects) &&
 	    oidset_contains(&p->bad_objects, oid))

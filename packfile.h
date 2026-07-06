@@ -472,14 +472,15 @@ void unpin_pack(struct packed_git *);
  * callback is expected to pin the pack (see pin_pack()); this closes the
  * window between "the lookup said the object is in this pack" and the
  * eventual read, during which a concurrent repack may delete the pack.
- * Pinning is best-effort: a callback failure does not fail the lookup.
- * Pass NULL to unregister. Used by pack-objects, which must keep every
- * source pack it commits to readable for the lifetime of the run.
+ * A callback failure makes the lookup a miss, allowing the caller to find
+ * another copy or retry after repreparing the object store. Pass NULL to
+ * unregister. Used by pack-objects, which must keep every source pack it
+ * commits to readable for the lifetime of the run.
  */
 void packfile_pin_packs_on_lookup(int (*pin)(struct packed_git *));
 
-/* Invoke the registered lookup pin callback, if any (object lookup code). */
-void packfile_lookup_pin(struct packed_git *p);
+/* Return non-zero when the registered lookup pin callback fails. */
+int packfile_lookup_pin(struct packed_git *p);
 
 void *unpack_entry(struct repository *r, struct packed_git *, off_t,
 		   enum object_type *, size_t *);
